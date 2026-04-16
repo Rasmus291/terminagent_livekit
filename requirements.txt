@@ -1,0 +1,4 @@
+google-genai
+sounddevice
+python-dotenv
+requests

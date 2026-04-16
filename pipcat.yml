@@ -1,0 +1,24 @@
+# pipcat.yml
+# Pipcat Orchestrierungsdatei für das Projekt "terminagent"
+
+version: 1
+
+services:
+  main:
+    entry: main.py
+    description: Hauptanwendung
+    depends_on: []
+    env:
+      - CONFIG=config.py
+  audio_handler:
+    entry: audio_handler.py
+    description: Audioverarbeitung
+    depends_on: []
+    env: []
+  test_api:
+    entry: scratch/test_api.py
+    description: Test-API
+    depends_on: []
+    env: []
+
+# Weitere Services können hier ergänzt werden.
