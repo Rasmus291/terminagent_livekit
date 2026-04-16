@@ -1,0 +1,2 @@
+# pipcat als Abhängigkeit für Orchestrierung
+pipcat
