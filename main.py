@@ -52,6 +52,17 @@ async def main():
                     ))
                     last_audio_sent_time = time.perf_counter()
 
+            async def trigger_greeting():
+                """Sendet einen initialen Trigger, damit der Agent das Gespräch eröffnet."""
+                await asyncio.sleep(0.5)  # Kurz warten bis receive_responses läuft
+                logger.info("Sende Begrüßungs-Trigger...")
+                await session.send_client_content(
+                    turns=types.Content(role="user", parts=[types.Part.from_text(
+                        text="Der Partner hat gerade abgenommen. Begrüße ihn jetzt und starte das Gespräch."
+                    )]),
+                    turn_complete=True
+                )
+
             async def receive_responses():
                 nonlocal last_audio_sent_time, current_turn_agent_text
                 while True:
@@ -105,7 +116,7 @@ async def main():
                         if should_end:
                             raise asyncio.CancelledError("Call completed")
 
-            await asyncio.gather(send_audio(), receive_responses())
+            await asyncio.gather(send_audio(), receive_responses(), trigger_greeting())
 
     except asyncio.CancelledError:
         logger.info("Session beendet.")
