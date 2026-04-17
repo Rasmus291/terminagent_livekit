@@ -1,4 +1,5 @@
 import os
+import json
 import datetime
 import logging
 
@@ -7,33 +8,81 @@ from config import MODEL_ID
 logger = logging.getLogger(__name__)
 
 
-def generate_summary(client, transcript):
-    """Erzeugt eine KI-Zusammenfassung des Gesprächs via Gemini (non-live)."""
+def generate_analysis(client, transcript):
+    """Erzeugt Zusammenfassung + Sentiment-Analyse als strukturiertes Dict via Gemini."""
     if not transcript:
-        return "*Kein Transkript für Zusammenfassung vorhanden.*"
+        return {
+            "zusammenfassung": "*Kein Transkript für Analyse vorhanden.*",
+            "sentiment_partner": None,
+            "sentiment_gesamt": "unbekannt",
+            "stimmung_details": "",
+            "ergebnis": "unbekannt"
+        }
     
     transcript_text = "\n".join(transcript)
-    prompt = f"""Fasse das folgende Telefongespräch zwischen einem LaVita-Agenten und einem Partner kurz und prägnant auf Deutsch zusammen. 
-Nenne die wichtigsten besprochenen Punkte, das Ergebnis (Termin vereinbart/abgelehnt/Rückruf) und eventuelle nächste Schritte.
+    prompt = f"""Analysiere das folgende Telefongespräch zwischen einem LaVita-Agenten und einem Partner.
+
+Antworte NUR mit validem JSON (kein Markdown, keine Code-Blöcke), exakt in diesem Format:
+{{
+  "zusammenfassung": "Kurze, prägnante Zusammenfassung auf Deutsch (2-4 Sätze). Wichtigste Punkte und Ergebnis.",
+  "sentiment_partner": 7,
+  "sentiment_gesamt": "positiv",
+  "stimmung_details": "Kurze Beschreibung der Stimmung des Partners, z.B. interessiert, gestresst, ablehnend",
+  "ergebnis": "scheduled"
+}}
+
+Felder:
+- sentiment_partner: 1-10 (1=sehr negativ, 10=sehr positiv)
+- sentiment_gesamt: "positiv", "neutral" oder "negativ"
+- ergebnis: "scheduled", "declined", "callback" oder "unbekannt"
 
 Transkript:
-{transcript_text}
-
-Zusammenfassung:"""
+{transcript_text}"""
     
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        return response.text.strip()
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt
+                )
+                raw = response.text.strip()
+                # JSON aus eventuellen Code-Blöcken extrahieren
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(f"JSON-Parsing fehlgeschlagen, Rohtext: {response.text[:200]}")
+                return {
+                    "zusammenfassung": response.text.strip(),
+                    "sentiment_partner": None,
+                    "sentiment_gesamt": "unbekannt",
+                    "stimmung_details": "",
+                    "ergebnis": "unbekannt"
+                }
+            except Exception as e:
+                if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e)):
+                    logger.warning(f"Analyse Versuch {attempt+1} fehlgeschlagen, wiederhole...")
+                    import time
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                raise
     except Exception as e:
-        logger.error(f"Zusammenfassung konnte nicht generiert werden: {e}")
-        return f"*Fehler bei der Zusammenfassung: {e}*"
+        logger.error(f"Analyse konnte nicht generiert werden: {e}")
+        return {
+            "zusammenfassung": f"*Fehler bei der Analyse: {e}*",
+            "sentiment_partner": None,
+            "sentiment_gesamt": "unbekannt",
+            "stimmung_details": "",
+            "ergebnis": "unbekannt"
+        }
 
 
 def save_session_report(transcript, crm_data=None, latency_data=None,
-                        call_duration=None, call_start_time=None, summary=None):
+                        call_duration=None, call_start_time=None, analysis=None):
     """Speichert den vollständigen Session Report als Markdown-Datei."""
     os.makedirs("sessions", exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -60,10 +109,18 @@ def save_session_report(transcript, crm_data=None, latency_data=None,
             f.write(f"- **Kontaktart:** {crm_data.get('contact_method', 'N/A')}\n")
             f.write(f"- **Notizen:** {crm_data.get('notes', 'N/A')}\n\n")
         
-        # KI-Zusammenfassung
-        if summary:
+        # KI-Zusammenfassung + Sentiment
+        if analysis and isinstance(analysis, dict):
             f.write("## Zusammenfassung\n\n")
-            f.write(f"{summary}\n\n")
+            f.write(f"{analysis.get('zusammenfassung', '')}\n\n")
+            
+            f.write("## Sentiment-Analyse\n")
+            f.write(f"- **Gesamtstimmung:** {analysis.get('sentiment_gesamt', 'unbekannt')}\n")
+            sentiment_score = analysis.get('sentiment_partner')
+            if sentiment_score is not None:
+                f.write(f"- **Partner-Stimmung:** {sentiment_score}/10\n")
+            f.write(f"- **Details:** {analysis.get('stimmung_details', '-')}\n")
+            f.write(f"- **Ergebnis:** {analysis.get('ergebnis', 'unbekannt')}\n\n")
         
         # Latenz-Statistiken
         if latency_data and len(latency_data) > 0:

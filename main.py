@@ -9,7 +9,7 @@ from google.genai import types
 
 from config import GEMINI_API_KEY, MODEL_ID, LIVE_CONFIG
 from audio_handler import AudioStreamer
-from reporting import save_session_report, generate_summary
+from reporting import save_session_report, generate_analysis
 from tool_handler import process_tool_calls
 
 # Logging Setup
@@ -125,6 +125,13 @@ async def main():
     finally:
         audio_streamer.stop()
 
+        # Gemeinsamer Timestamp für Audio + Report
+        session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Audio-Aufzeichnung speichern
+        logger.info("Speichere Audio-Aufzeichnung...")
+        audio_streamer.save_recording("sessions", timestamp=session_timestamp)
+
         # Unvollständigen Agent-Turn noch sichern
         if current_turn_agent_text.strip():
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -133,8 +140,8 @@ async def main():
         call_duration = time.perf_counter() - session_start_perf
         call_start_str = session_start_time.strftime('%Y-%m-%d %H:%M:%S')
 
-        logger.info("Generiere Zusammenfassung...")
-        summary = generate_summary(client, session_transcript)
+        logger.info("Generiere Analyse + Sentiment...")
+        analysis = generate_analysis(client, session_transcript)
 
         logger.info("Speichere Session Report...")
         save_session_report(
@@ -143,7 +150,7 @@ async def main():
             latency_data=latency_measurements,
             call_duration=call_duration,
             call_start_time=call_start_str,
-            summary=summary
+            analysis=analysis
         )
 
 

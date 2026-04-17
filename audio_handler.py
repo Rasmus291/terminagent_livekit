@@ -2,6 +2,9 @@ import sounddevice as sd
 import asyncio
 import threading
 import queue
+import wave
+import struct
+import os
 
 class AudioStreamer:
     """Modular class for asynchronous PCM audio streaming (16-bit PCM).
@@ -23,6 +26,10 @@ class AudioStreamer:
         self.is_running = False
         self.playback_thread = None
         
+        # Audio-Aufzeichnung: Rohe PCM-Daten sammeln
+        self.recording_input = bytearray()   # Partner/Mikrofon (16kHz)
+        self.recording_output = bytearray()  # Agent (24kHz)
+        
         # Event Loop Referenz für Thread-sicheres Queuing aus dem Audio-Callback
         try:
             self.loop = asyncio.get_event_loop()
@@ -36,8 +43,9 @@ class AudioStreamer:
         
         def input_callback(indata, frames, time, status):
             if self.is_running:
-                # Sicherer Push der Audio-Daten vom Audio-Thread in die asynchrone Python-Queue
-                self.loop.call_soon_threadsafe(self.input_queue.put_nowait, bytes(indata))
+                raw = bytes(indata)
+                self.recording_input.extend(raw)
+                self.loop.call_soon_threadsafe(self.input_queue.put_nowait, raw)
 
         # RawInputStream nutzt direkt int16 bytes (16-bit PCM little endian)
         self.in_stream = sd.RawInputStream(
@@ -103,6 +111,7 @@ class AudioStreamer:
     def play_output_stream(self, chunk: bytes):
         """Fügt empfangene 24kHz Audio-Chunks vom Modell in die Queue ein."""
         if self.is_running:
+            self.recording_output.extend(chunk)
             self.output_queue.put(chunk)
 
     def clear_output(self):
@@ -129,3 +138,51 @@ class AudioStreamer:
             self.out_stream.stop()
             self.out_stream.close()
             self.out_stream = None
+
+    def save_recording(self, directory="sessions", timestamp=None):
+        """Speichert eine kombinierte Stereo-WAV (Partner links, Agent rechts)."""
+        os.makedirs(directory, exist_ok=True)
+        if not timestamp:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if not self.recording_input and not self.recording_output:
+            return {}
+        
+        # Agent-Audio von 24kHz auf 16kHz resampling (Sample-Dropping)
+        agent_16k = self._resample(self.recording_output, self.output_rate, self.input_rate)
+        partner = self.recording_input
+        
+        # Auf gleiche Länge bringen (mit Stille auffüllen)
+        max_len = max(len(partner), len(agent_16k))
+        partner_padded = partner + bytes(max_len - len(partner))
+        agent_padded = agent_16k + bytes(max_len - len(agent_16k))
+        
+        # Stereo interleaven: [L_sample, R_sample, L_sample, R_sample, ...]
+        partner_samples = struct.unpack(f'<{len(partner_padded)//2}h', partner_padded)
+        agent_samples = struct.unpack(f'<{len(agent_padded)//2}h', agent_padded)
+        
+        stereo = bytearray()
+        for p, a in zip(partner_samples, agent_samples):
+            stereo.extend(struct.pack('<hh', p, a))
+        
+        # Als Stereo-WAV speichern
+        path = os.path.join(directory, f"recording_{timestamp}.wav")
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(2)          # Stereo
+            wf.setsampwidth(2)          # 16-bit
+            wf.setframerate(self.input_rate)  # 16kHz
+            wf.writeframes(bytes(stereo))
+        
+        return {"recording": path}
+
+    @staticmethod
+    def _resample(data, from_rate, to_rate):
+        """Einfaches Resampling per Sample-Auswahl (reines Python, keine Dependencies)."""
+        if not data or from_rate == to_rate:
+            return data
+        samples = struct.unpack(f'<{len(data)//2}h', data)
+        ratio = from_rate / to_rate
+        new_count = int(len(samples) / ratio)
+        resampled = [samples[min(int(i * ratio), len(samples) - 1)] for i in range(new_count)]
+        return struct.pack(f'<{len(resampled)}h', *resampled)
