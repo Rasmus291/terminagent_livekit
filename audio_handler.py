@@ -9,7 +9,7 @@ class AudioStreamer:
     Utilizes a dedicated playback thread to prevent blocking the asyncio event loop.
     """
     
-    def __init__(self, input_rate=16000, output_rate=24000, channels=1, chunk_size=4096):
+    def __init__(self, input_rate=16000, output_rate=24000, channels=1, chunk_size=512):
         self.input_rate = input_rate
         self.output_rate = output_rate
         self.channels = channels
@@ -45,6 +45,7 @@ class AudioStreamer:
             channels=self.channels,
             dtype='int16',
             blocksize=self.chunk_size,
+            latency='low',
             callback=input_callback
         )
         
@@ -52,7 +53,8 @@ class AudioStreamer:
             samplerate=self.output_rate,
             channels=self.channels,
             dtype='int16',
-            blocksize=self.chunk_size
+            blocksize=1024,
+            latency='low'
         )
 
         self.in_stream.start()
@@ -84,19 +86,19 @@ class AudioStreamer:
             self.start()
             
         buffer = bytearray()
-        # Sende 250ms Chunks, um den Websocket nicht mit zu vielen kleinen Frames zu überlasten
-        # 16000 Hz * 1 channel * 2 bytes = 32000 bytes/sec -> 8000 bytes = 250ms
-        target_bytes = 8000
+        # Sende 100ms Chunks für niedrigere Latenz
+        # 16000 Hz * 1 channel * 2 bytes = 32000 bytes/sec -> 3200 bytes = 100ms
+        target_bytes = 3200
         
         while self.is_running:
             try:
-                chunk = await asyncio.wait_for(self.input_queue.get(), timeout=1.0)
+                chunk = await self.input_queue.get()
                 buffer.extend(chunk)
                 while len(buffer) >= target_bytes:
                     yield bytes(buffer[:target_bytes])
                     buffer = buffer[target_bytes:]
-            except asyncio.TimeoutError:
-                continue
+            except Exception:
+                break
 
     def play_output_stream(self, chunk: bytes):
         """Fügt empfangene 24kHz Audio-Chunks vom Modell in die Queue ein."""
