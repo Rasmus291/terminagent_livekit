@@ -36,12 +36,12 @@ async def handle_schedule_appointment(fc, session, crm_data_saved, audio_streame
     except Exception as send_err:
         logger.error(f"Konnte Tool Response nicht an Modell zurücksenden: {send_err}")
 
-    logger.info("Termin verarbeitet. Gespräch wird beendet...")
+    logger.info("Termin verarbeitet. Warte auf verbleibende Audio-Ausgabe...")
 
-    # Warte bis ausstehende Audio-Chunks abgespielt sind
+    # Warte bis das letzte Audio (Verabschiedung) abgespielt ist
     while not audio_streamer.output_queue.empty():
-        await asyncio.sleep(0.5)
-    await asyncio.sleep(2.0)
+        await asyncio.sleep(0.3)
+    await asyncio.sleep(1.5)
 
     return payload
 
