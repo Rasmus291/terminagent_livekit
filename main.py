@@ -60,10 +60,19 @@ async def main():
                 )
 
             async def receive_responses():
+                appointment_done = False
                 while True:
-                    should_end = await handler.process_turn(session)
-                    if should_end:
-                        raise asyncio.CancelledError("Call completed")
+                    if appointment_done:
+                        # Nach Terminvereinbarung: Noch kurz auf Rückfragen warten
+                        try:
+                            await asyncio.wait_for(handler.process_turn(session), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            logger.info("Keine weiteren Rückfragen. Beende Gespräch.")
+                            raise asyncio.CancelledError("Call completed")
+                    else:
+                        tool_triggered = await handler.process_turn(session)
+                        if tool_triggered:
+                            appointment_done = True
 
             await asyncio.gather(send_audio(), receive_responses(), trigger_greeting())
 
