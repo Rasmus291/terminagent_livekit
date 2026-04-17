@@ -4,6 +4,7 @@ import threading
 import queue
 import wave
 import struct
+import time
 import os
 
 class AudioStreamer:
@@ -26,9 +27,10 @@ class AudioStreamer:
         self.is_running = False
         self.playback_thread = None
         
-        # Audio-Aufzeichnung: Rohe PCM-Daten sammeln
-        self.recording_input = bytearray()   # Partner/Mikrofon (16kHz)
-        self.recording_output = bytearray()  # Agent (24kHz)
+        # Audio-Aufzeichnung: Input fortlaufend, Output mit Zeitstempel für Synchronisation
+        self.recording_input = bytearray()                # Partner/Mikrofon (16kHz) — fortlaufend
+        self.recording_output_chunks = []                  # Agent (24kHz) — [(zeitpunkt, bytes), ...]
+        self._recording_start_time = None                  # Wird beim Start gesetzt
         
         # Event Loop Referenz für Thread-sicheres Queuing aus dem Audio-Callback
         try:
@@ -40,6 +42,7 @@ class AudioStreamer:
     def start(self):
         """Initialisiert Audio-Streams und das Callback-System."""
         self.is_running = True
+        self._recording_start_time = time.perf_counter()
         
         def input_callback(indata, frames, time, status):
             if self.is_running:
@@ -111,7 +114,9 @@ class AudioStreamer:
     def play_output_stream(self, chunk: bytes):
         """Fügt empfangene 24kHz Audio-Chunks vom Modell in die Queue ein."""
         if self.is_running:
-            self.recording_output.extend(chunk)
+            # Zeitstempel relativ zum Aufnahmestart speichern für spätere Synchronisation
+            elapsed = time.perf_counter() - self._recording_start_time
+            self.recording_output_chunks.append((elapsed, chunk))
             self.output_queue.put(chunk)
 
     def clear_output(self):
@@ -140,39 +145,55 @@ class AudioStreamer:
             self.out_stream = None
 
     def save_recording(self, directory="sessions", timestamp=None):
-        """Speichert eine kombinierte Stereo-WAV (Partner links, Agent rechts)."""
+        """Speichert eine synchronisierte Stereo-WAV (Partner links, Agent rechts)."""
         os.makedirs(directory, exist_ok=True)
         if not timestamp:
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        if not self.recording_input and not self.recording_output:
+        if not self.recording_input and not self.recording_output_chunks:
             return {}
         
-        # Agent-Audio von 24kHz auf 16kHz resampling (Sample-Dropping)
-        agent_16k = self._resample(self.recording_output, self.output_rate, self.input_rate)
+        # Partner-Track: Fortlaufend aufgenommen, direkt nutzbar
         partner = self.recording_input
+        partner_duration = len(partner) / (self.input_rate * 2)  # Sekunden
         
-        # Auf gleiche Länge bringen (mit Stille auffüllen)
-        max_len = max(len(partner), len(agent_16k))
-        partner_padded = partner + bytes(max_len - len(partner))
-        agent_padded = agent_16k + bytes(max_len - len(agent_16k))
+        # Agent-Track: Zeitgestempelte Chunks auf eine durchgehende Timeline legen
+        # 1. Agent-Audio von 24kHz auf 16kHz resampling
+        # 2. An der richtigen Zeitposition einfügen, Lücken = Stille
+        total_samples_16k = len(partner) // 2  # Gleiche Länge wie Partner
+        agent_track = bytearray(total_samples_16k * 2)  # Initialisiert mit Stille (Nullbytes)
         
-        # Stereo interleaven: [L_sample, R_sample, L_sample, R_sample, ...]
-        partner_samples = struct.unpack(f'<{len(partner_padded)//2}h', partner_padded)
-        agent_samples = struct.unpack(f'<{len(agent_padded)//2}h', agent_padded)
+        for elapsed_time, chunk_data in self.recording_output_chunks:
+            # Position im 16kHz-Track berechnen
+            sample_pos = int(elapsed_time * self.input_rate)
+            byte_pos = sample_pos * 2  # 16-bit = 2 bytes pro Sample
+            
+            # Chunk von 24kHz auf 16kHz resampling
+            chunk_16k = self._resample(chunk_data, self.output_rate, self.input_rate)
+            
+            # In den Track einfügen (ohne über das Ende hinauszuschreiben)
+            end_pos = min(byte_pos + len(chunk_16k), len(agent_track))
+            available = end_pos - byte_pos
+            if available > 0 and byte_pos >= 0:
+                agent_track[byte_pos:end_pos] = chunk_16k[:available]
+        
+        # Stereo interleaven: [Partner_sample, Agent_sample, ...]
+        partner_samples = struct.unpack(f'<{len(partner)//2}h', partner)
+        agent_samples = struct.unpack(f'<{len(agent_track)//2}h', agent_track)
         
         stereo = bytearray()
         for p, a in zip(partner_samples, agent_samples):
             stereo.extend(struct.pack('<hh', p, a))
         
-        # Als Stereo-WAV speichern
         path = os.path.join(directory, f"recording_{timestamp}.wav")
         with wave.open(path, "wb") as wf:
-            wf.setnchannels(2)          # Stereo
-            wf.setsampwidth(2)          # 16-bit
-            wf.setframerate(self.input_rate)  # 16kHz
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(self.input_rate)
             wf.writeframes(bytes(stereo))
+        
+        return {"recording": path}
         
         return {"recording": path}
 
