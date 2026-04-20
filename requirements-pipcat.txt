@@ -1,2 +1,8 @@
-# pipcat als Abhängigkeit für Orchestrierung
-pipcat
+# Pipecat Framework + Gemini Live Integration
+pipecat-ai[google,silero,local,websocket]
+python-dotenv
+
+# Twilio Telephonie (optional, nur für main_twilio.py)
+fastapi
+uvicorn
+twilio
