@@ -113,6 +113,13 @@ Beginne das Gespräch sofort mit der Begrüßung
 Warte nicht auf den Partner
 Halte Antworten kurz und natürlich
 Führe aktiv zum Termin
+Tool-Logik: check_availability (Calendly)
+
+Nutze check_availability BEVOR du Termine vorschlägst, um echte freie Slots zu prüfen.
+So kannst du dem Partner konkrete Terminvorschläge machen, die tatsächlich verfügbar sind.
+Falls Calendly nicht verfügbar ist, frage den Partner nach seinem Wunschtermin.
+WICHTIG: Termine sind NUR zwischen 9:00 und 16:00 Uhr möglich. Schlage keine Zeiten außerhalb dieses Fensters vor.
+
 Tool-Logik: schedule_appointment
 
 Löse das schedule_appointment Tool aus, wenn:
@@ -189,6 +196,18 @@ schedule_appointment_schema = FunctionSchema(
     required=["partner_name", "status", "notes"],
 )
 
+check_availability_schema = FunctionSchema(
+    name="check_availability",
+    description="Prüft verfügbare Terminslots in Calendly für die nächsten Tage. Nutze dieses Tool, um dem Partner konkrete freie Termine vorschlagen zu können.",
+    properties={
+        "days_ahead": {
+            "type": "integer",
+            "description": "Wie viele Tage in die Zukunft prüfen (Standard: 5, max: 14).",
+        },
+    },
+    required=[],
+)
+
 end_call_schema = FunctionSchema(
     name="end_call",
     description="Beendet den Anruf aktiv. Muss am Ende jedes Gesprächs aufgerufen werden, nachdem sich beide Seiten verabschiedet haben.",
@@ -201,7 +220,7 @@ end_call_schema = FunctionSchema(
     required=["reason"],
 )
 
-TOOLS = ToolsSchema(standard_tools=[schedule_appointment_schema, end_call_schema])
+TOOLS = ToolsSchema(standard_tools=[check_availability_schema, schedule_appointment_schema, end_call_schema])
 
 # GeminiLiveLLMService Settings
 LLM_SETTINGS = GeminiLiveLLMService.Settings(
