@@ -72,6 +72,7 @@ class InputAudioGain(FrameProcessor):
         self.gain = gain
 
     async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
         if isinstance(frame, InputAudioRawFrame) and self.gain != 1.0:
             samples = array.array('h', frame.audio)
             for i in range(len(samples)):
