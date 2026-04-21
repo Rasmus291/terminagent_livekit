@@ -26,9 +26,15 @@ CALENDLY_BASE_URL = "https://api.calendly.com"
 CALENDLY_API_TOKEN = os.getenv("CALENDLY_API_TOKEN", "")
 CALENDLY_EVENT_TYPE_URI = os.getenv("CALENDLY_EVENT_TYPE_URI", "")
 
-# Zeitfenster: Nur Termine zwischen 9:00 und 16:00 Uhr (lokale Zeit)
-BOOKING_HOUR_MIN = 9
-BOOKING_HOUR_MAX = 16
+# Verbindliche Bürozeiten (lokale Zeit):
+# Montag-Donnerstag 08:00-17:00, Freitag 08:00-16:00, Wochenende geschlossen
+WEEKDAY_BOOKING_WINDOWS = {
+    0: (8, 17),  # Montag
+    1: (8, 17),  # Dienstag
+    2: (8, 17),  # Mittwoch
+    3: (8, 17),  # Donnerstag
+    4: (8, 16),  # Freitag
+}
 BOOKING_TIMEZONE = "Europe/Berlin"
 
 # Wird beim ersten Aufruf gecacht
@@ -117,15 +123,19 @@ async def get_available_slots(days_ahead: int = 5) -> list[dict]:
 
     logger.info(f"Calendly: {len(slots)} verfügbare Slots in den nächsten {days_ahead} Tagen")
 
-    # Nur Slots zwischen BOOKING_HOUR_MIN und BOOKING_HOUR_MAX (lokale Zeit) behalten
+    # Nur Slots innerhalb der Bürozeiten (lokale Zeit) behalten
     tz = ZoneInfo(BOOKING_TIMEZONE)
     filtered = []
     for slot in slots:
         start_local = datetime.fromisoformat(slot["start_time"]).astimezone(tz)
-        if BOOKING_HOUR_MIN <= start_local.hour < BOOKING_HOUR_MAX:
+        window = WEEKDAY_BOOKING_WINDOWS.get(start_local.weekday())
+        if window is None:
+            continue
+        hour_min, hour_max = window
+        if hour_min <= start_local.hour < hour_max:
             filtered.append(slot)
 
-    logger.info(f"Calendly: {len(filtered)} Slots nach Zeitfilter ({BOOKING_HOUR_MIN}:00-{BOOKING_HOUR_MAX}:00)")
+    logger.info("Calendly: %s Slots nach Bürozeiten-Filter", len(filtered))
     return filtered
 
 
