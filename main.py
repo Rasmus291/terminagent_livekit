@@ -35,11 +35,13 @@ async def main():
     audio_streamer = AudioStreamer()
     handler = ResponseHandler(audio_streamer, session_transcript, crm_data_saved, latency_measurements)
 
+    # Audio-Hardware parallel zum API-Connect starten
+    audio_streamer.start()
+
     try:
         logger.info("Verbinde mit Gemini Live API...")
         async with client.aio.live.connect(model=MODEL_ID, config=LIVE_CONFIG) as session:
             logger.info("Session gestartet. Du kannst jetzt sprechen.")
-            audio_streamer.start()
 
             async def send_audio():
                 async for chunk in audio_streamer.get_input_stream():
@@ -50,7 +52,7 @@ async def main():
                     handler.last_audio_sent_time = time.perf_counter()
 
             async def trigger_greeting():
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.15)
                 logger.info("Sende Begrüßungs-Trigger...")
                 await session.send_client_content(
                     turns=types.Content(role="user", parts=[types.Part.from_text(
@@ -97,7 +99,7 @@ async def main():
         call_start_str = session_start_time.strftime('%Y-%m-%d %H:%M:%S')
 
         logger.info("Generiere Analyse + Sentiment...")
-        analysis = generate_analysis(client, session_transcript)
+        analysis = await generate_analysis(client, session_transcript)
 
         logger.info("Speichere Session Report...")
         save_session_report(
