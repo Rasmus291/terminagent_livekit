@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from pipecat.services.llm_service import FunctionCallParams
 
@@ -12,6 +13,38 @@ logger = logging.getLogger(__name__)
 crm_data_saved = {}
 appointment_done = False
 call_ended = asyncio.Event()
+partner_farewell_detected = False
+
+_FAREWELL_PATTERNS = (
+    r"\btsch(u|ü)ss\b",
+    r"\bauf wiederh(ö|oe)ren\b",
+    r"\bbis dann\b",
+    r"\bbis bald\b",
+    r"\bsch(ö|oe)nen tag noch\b",
+    r"\bciao\b",
+)
+
+
+def reset_call_state() -> None:
+    global appointment_done, partner_farewell_detected
+    appointment_done = False
+    partner_farewell_detected = False
+    call_ended.clear()
+
+
+def mark_partner_farewell(text: str) -> bool:
+    global partner_farewell_detected
+
+    if partner_farewell_detected:
+        return True
+
+    normalized = (text or "").lower()
+    for pattern in _FAREWELL_PATTERNS:
+        if re.search(pattern, normalized):
+            partner_farewell_detected = True
+            logger.info("Partner-Verabschiedung erkannt.")
+            return True
+    return False
 
 
 async def handle_check_availability(params: FunctionCallParams):
@@ -82,6 +115,15 @@ async def handle_end_call(params: FunctionCallParams):
     global appointment_done
 
     reason = params.arguments.get("reason", "completed")
+
+    if not partner_farewell_detected:
+        await params.result_callback({
+            "status": "deferred",
+            "reason": "waiting_for_partner_farewell",
+            "message": "Partner hat sich noch nicht verabschiedet. Bitte freundlich abschließen und auf Verabschiedung warten.",
+        })
+        return
+
     logger.info(f"Anruf wird beendet. Grund: {reason}")
 
     appointment_done = True

@@ -52,7 +52,14 @@ from pipecat.transports.websocket.fastapi import (
 )
 
 from config_pipecat import GEMINI_API_KEY, LLM_SETTINGS, TOOLS
-from tool_handler_pipecat import handle_schedule_appointment, crm_data_saved
+from tool_handler_pipecat import (
+    handle_check_availability,
+    handle_schedule_appointment,
+    handle_end_call,
+    crm_data_saved,
+    mark_partner_farewell,
+    reset_call_state,
+)
 from reporting_pipecat import save_session_report, generate_analysis
 
 load_dotenv()
@@ -105,6 +112,7 @@ async def twilio_websocket(websocket: WebSocket):
     Hier wird die Pipecat Pipeline für jeden Anruf instanziiert.
     """
     await websocket.accept()
+    reset_call_state()
 
     # Erste Nachricht von Twilio enthält Stream-Metadaten
     initial_msg = await websocket.receive_json()
@@ -156,7 +164,9 @@ async def twilio_websocket(websocket: WebSocket):
         settings=LLM_SETTINGS,
         tools=TOOLS,
     )
+    llm.register_function("check_availability", handle_check_availability)
     llm.register_function("schedule_appointment", handle_schedule_appointment)
+    llm.register_function("end_call", handle_end_call)
 
     # --- Context ---
     context = LLMContext(
@@ -210,6 +220,7 @@ async def twilio_websocket(websocket: WebSocket):
         if message.content:
             logger.info(f"User: {message.content}")
             session_transcript.append(f"**[{ts}] User:** {message.content}")
+            mark_partner_farewell(message.content)
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn(aggregator, message: AssistantTurnStoppedMessage):

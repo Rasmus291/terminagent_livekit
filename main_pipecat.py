@@ -35,7 +35,15 @@ from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 
 from config_pipecat import GEMINI_API_KEY, LLM_SETTINGS, TOOLS
-from tool_handler_pipecat import handle_check_availability, handle_schedule_appointment, handle_end_call, crm_data_saved, appointment_done, call_ended
+from tool_handler_pipecat import (
+    handle_check_availability,
+    handle_schedule_appointment,
+    handle_end_call,
+    crm_data_saved,
+    call_ended,
+    mark_partner_farewell,
+    reset_call_state,
+)
 from reporting_pipecat import save_session_report, generate_analysis
 
 # Logging Setup
@@ -91,6 +99,7 @@ async def main():
         return
 
     os.makedirs("sessions", exist_ok=True)
+    reset_call_state()
 
     # Session-Tracking
     session_transcript = []
@@ -119,8 +128,9 @@ async def main():
     llm.register_function("schedule_appointment", handle_schedule_appointment)
     llm.register_function("end_call", handle_end_call)
 
-    # --- Mikrofon-Verstärkung (3x Gain für bessere Spracherkennung) ---
-    input_gain = InputAudioGain(gain=3.0)
+    # --- Mikrofon-Verstärkung (konfigurierbar, konservativer Default) ---
+    mic_gain = float(os.getenv("MIC_GAIN", "1.4"))
+    input_gain = InputAudioGain(gain=mic_gain)
 
     # --- Context + Aggregators ---
     # Initialer Context: Begrüßungs-Trigger (wie in main.py)
@@ -159,6 +169,7 @@ async def main():
         if text:
             logger.info(f"User: {text}")
             session_transcript.append(f"**[{ts}] User:** {text}")
+            mark_partner_farewell(text)
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn(aggregator, message: AssistantTurnStoppedMessage):

@@ -47,7 +47,7 @@ Rahmen:
 Termin dauert 10 Minuten
 Ziel: Zusammenarbeit optimieren
 Terminvergabe über Kalender (z. B. Odoo / Calendly)
-Zeiten: Montag–Donnerstag 8–17 Uhr, Freitag 8–16 Uhr
+Verbindliche Bürozeiten: Montag–Donnerstag 8–17 Uhr, Freitag 8–16 Uhr
 
 Gesprächsablauf (2–4 Minuten Zielzeit)
 
@@ -125,7 +125,10 @@ Tool-Logik: check_availability (Calendly)
 Nutze check_availability BEVOR du Termine vorschlägst, um echte freie Slots zu prüfen.
 So kannst du dem Partner konkrete Terminvorschläge machen, die tatsächlich verfügbar sind.
 Falls Calendly nicht verfügbar ist, frage den Partner nach seinem Wunschtermin.
-WICHTIG: Termine sind NUR zwischen 9:00 und 16:00 Uhr möglich. Schlage keine Zeiten außerhalb dieses Fensters vor.
+WICHTIG: Halte Terminvorschläge strikt innerhalb der Bürozeiten:
+- Montag bis Donnerstag: 08:00–17:00 Uhr
+- Freitag: 08:00–16:00 Uhr
+- Samstag/Sonntag: keine Termine
 
 Tool-Logik: schedule_appointment
 
@@ -160,7 +163,8 @@ Verabschieden ("Vielen Dank und auf Wiederhören!")
 end_call aufrufen
 
 WICHTIG:
-Der Anruf darf NIEMALS offen bleiben."""
+Der Anruf darf NIEMALS offen bleiben.
+Rufe end_call aber erst auf, wenn der Partner sich ebenfalls klar verabschiedet hat (z. B. "Tschüss", "Auf Wiederhören", "Bis dann")."""
 
 # Tool-Definition als Pipecat FunctionSchema
 schedule_appointment_schema = FunctionSchema(
@@ -223,11 +227,11 @@ LLM_SETTINGS = GeminiLiveLLMService.Settings(
     voice="Kore",
     language="de-DE",
     system_instruction=SYSTEM_INSTRUCTION,
-    # VAD sensibler machen: Schnellere Spracherkennung, kürzere Stille-Grenze
+    # VAD für flüssigere Dialoge und weniger Fehltrigger einstellen
     vad=GeminiVADParams(
-        start_sensitivity="START_SENSITIVITY_HIGH",   # Erkennt Sprache schneller
-        end_sensitivity="END_SENSITIVITY_HIGH",       # Erkennt Stille schneller
-        silence_duration_ms=300,                       # 300ms Stille = Ende (Standard: ~500ms)
-        prefix_padding_ms=100,                         # 100ms Audio vor Sprachbeginn behalten
+        start_sensitivity="START_SENSITIVITY_LOW",
+        end_sensitivity="END_SENSITIVITY_HIGH",
+        silence_duration_ms=280,
+        prefix_padding_ms=320,
     ),
 )
