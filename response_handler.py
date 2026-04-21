@@ -113,6 +113,7 @@ class ResponseHandler:
         turn = session.receive()
         self.current_turn_text = ""
         self._first_audio_in_turn = True
+        self.audio_streamer.new_turn()
 
         async for response in turn:
             # Server Content: Transkription, Audio, Turn-Status

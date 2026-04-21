@@ -26,6 +26,8 @@ class AudioStreamer:
         self.output_queue = queue.Queue()
         self.is_running = False
         self.playback_thread = None
+        self._prebuffer_count = 3        # Chunks zu sammeln bevor Wiedergabe startet
+        self._turn_started = False       # Flag: Pre-Buffer abgeschlossen?
         
         # Audio-Aufzeichnung: Input fortlaufend, Output mit Zeitstempel für Synchronisation
         self.recording_input = bytearray()                # Partner/Mikrofon (16kHz) — fortlaufend
@@ -65,7 +67,7 @@ class AudioStreamer:
             channels=self.channels,
             dtype='int16',
             blocksize=1024,
-            latency='low'
+            latency=0.05    # 50ms Buffer — verhindert Stotterer am Turn-Anfang
         )
 
         self.in_stream.start()
@@ -78,18 +80,41 @@ class AudioStreamer:
         self.playback_thread.start()
 
     def _playback_loop(self):
-        """Dauerhafte Schleife im Hintergrund-Thread, die Audio wegschreibt."""
+        """Dauerhafte Schleife im Hintergrund-Thread, die Audio wegschreibt.
+        Pre-buffert am Anfang jedes Turns, um Underruns/Stotterer zu vermeiden."""
+        prebuffer = []
         while self.is_running:
             try:
-                # Timeout ermöglicht sanftes Beenden bei stop()
                 chunk = self.output_queue.get(timeout=0.1)
-                if self.is_running and self.out_stream:
+                if not self.is_running or not self.out_stream:
+                    continue
+                
+                if not self._turn_started:
+                    # Erste Chunks des Turns sammeln bevor Wiedergabe startet
+                    prebuffer.append(chunk)
+                    if len(prebuffer) >= self._prebuffer_count:
+                        for buf_chunk in prebuffer:
+                            try:
+                                self.out_stream.write(buf_chunk)
+                            except Exception:
+                                pass
+                        prebuffer.clear()
+                        self._turn_started = True
+                else:
                     try:
                         self.out_stream.write(chunk)
                     except Exception:
                         pass
             except queue.Empty:
-                pass
+                # Queue leer + noch Pre-Buffer da → Turn ist kurz, trotzdem abspielen
+                if prebuffer and self._turn_started is False:
+                    for buf_chunk in prebuffer:
+                        try:
+                            self.out_stream.write(buf_chunk)
+                        except Exception:
+                            pass
+                    prebuffer.clear()
+                    self._turn_started = True
 
     async def get_input_stream(self):
         """Asynchroner Generator, der Mikrofon-Daten liest und yieldet."""
@@ -97,9 +122,9 @@ class AudioStreamer:
             self.start()
             
         buffer = bytearray()
-        # Sende 100ms Chunks für niedrigere Latenz
-        # 16000 Hz * 1 channel * 2 bytes = 32000 bytes/sec -> 3200 bytes = 100ms
-        target_bytes = 3200
+        # Sende 50ms Chunks für minimale Latenz
+        # 16000 Hz * 1 channel * 2 bytes = 32000 bytes/sec -> 1600 bytes = 50ms
+        target_bytes = 1600
         
         while self.is_running:
             try:
@@ -111,6 +136,10 @@ class AudioStreamer:
             except Exception:
                 break
 
+    def new_turn(self):
+        """Signalisiert den Start eines neuen Agent-Turns für Pre-Buffering."""
+        self._turn_started = False
+
     def play_output_stream(self, chunk: bytes):
         """Fügt empfangene 24kHz Audio-Chunks vom Modell in die Queue ein."""
         if self.is_running:
@@ -121,6 +150,7 @@ class AudioStreamer:
 
     def clear_output(self):
         """Leert die Wiedergabe-Warteschlange (z.B. wenn der Agent unterbrochen wird)."""
+        self._turn_started = False
         while not self.output_queue.empty():
             try:
                 self.output_queue.get_nowait()

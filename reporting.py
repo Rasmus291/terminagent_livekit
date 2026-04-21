@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import datetime
 import logging
 
@@ -8,7 +9,7 @@ from config import MODEL_ID
 logger = logging.getLogger(__name__)
 
 
-def generate_analysis(client, transcript):
+async def generate_analysis(client, transcript):
     """Erzeugt Zusammenfassung + Sentiment-Analyse als strukturiertes Dict via Gemini."""
     if not transcript:
         return {
@@ -66,8 +67,7 @@ Transkript:
             except Exception as e:
                 if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e)):
                     logger.warning(f"Analyse Versuch {attempt+1} fehlgeschlagen, wiederhole...")
-                    import time
-                    time.sleep(5 * (attempt + 1))
+                    await asyncio.sleep(2 * (attempt + 1))
                     continue
                 raise
     except Exception as e:
