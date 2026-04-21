@@ -3,12 +3,28 @@ import logging
 
 from pipecat.services.llm_service import FunctionCallParams
 
+import calendly_service
+import email_service
+
 logger = logging.getLogger(__name__)
 
 # Gemeinsamer State für CRM-Daten (wird von main_pipecat.py referenziert)
 crm_data_saved = {}
 appointment_done = False
 call_ended = asyncio.Event()
+
+
+async def handle_check_availability(params: FunctionCallParams):
+    """Prüft verfügbare Termine über Calendly."""
+    days = params.arguments.get("days_ahead", 5)
+    if not calendly_service.is_configured():
+        await params.result_callback({
+            "available_slots": "Calendly nicht konfiguriert. Bitte frage den Partner nach einem passenden Termin."
+        })
+        return
+
+    slots_text = await calendly_service.format_available_slots(days_ahead=days)
+    await params.result_callback({"available_slots": slots_text})
 
 
 async def handle_schedule_appointment(params: FunctionCallParams):
@@ -32,10 +48,33 @@ async def handle_schedule_appointment(params: FunctionCallParams):
     if payload.get("notes"):
         logger.info(f"  Notizen: {payload.get('notes')}")
 
+    # Calendly-Buchungslink erstellen, falls konfiguriert und Termin vereinbart
+    booking_url = None
+    if calendly_service.is_configured() and payload.get("status") == "scheduled":
+        try:
+            booking_url = await calendly_service.create_scheduling_link()
+            logger.info(f"  Calendly Buchungslink: {booking_url}")
+        except Exception as e:
+            logger.warning(f"  Calendly Buchungslink konnte nicht erstellt werden: {e}")
+
+    # E-Mail-Benachrichtigung an Mitarbeiter senden (als Terminvorschlag)
+    email_sent = email_service.send_appointment_proposal(
+        partner_name=payload.get("partner_name", "Unbekannt"),
+        appointment_date=payload.get("appointment_date", ""),
+        contact_method=payload.get("contact_method", ""),
+        notes=payload.get("notes", ""),
+        status=payload.get("status", "scheduled"),
+        calendly_link=booking_url,
+    )
+
     appointment_done = True
 
-    # Pipecat sendet das Ergebnis automatisch als Tool Response an Gemini
-    await params.result_callback({"status": "recorded"})
+    result = {"status": "recorded"}
+    if booking_url:
+        result["calendly_booking_url"] = booking_url
+    if email_sent:
+        result["email_notification"] = "sent"
+    await params.result_callback(result)
 
 
 async def handle_end_call(params: FunctionCallParams):

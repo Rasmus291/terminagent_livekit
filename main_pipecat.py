@@ -35,7 +35,7 @@ from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 
 from config_pipecat import GEMINI_API_KEY, LLM_SETTINGS, TOOLS
-from tool_handler_pipecat import handle_schedule_appointment, handle_end_call, crm_data_saved, appointment_done, call_ended
+from tool_handler_pipecat import handle_check_availability, handle_schedule_appointment, handle_end_call, crm_data_saved, appointment_done, call_ended
 from reporting_pipecat import save_session_report, generate_analysis
 
 # Logging Setup
@@ -115,6 +115,7 @@ async def main():
     )
 
     # Tools registrieren
+    llm.register_function("check_availability", handle_check_availability)
     llm.register_function("schedule_appointment", handle_schedule_appointment)
     llm.register_function("end_call", handle_end_call)
 
