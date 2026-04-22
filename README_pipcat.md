@@ -1,25 +1,30 @@
-# README für Pipcat-Orchestrierung
+# LiveKit-Anbindung (statt Pipecat)
 
-Dieses Projekt verwendet eine Pipcat-Orchestrierungsstruktur.
+Diese Projektvariante nutzt **LiveKit Agents** mit **Gemini Live API** als Sprachmodell.
 
-## Struktur
-- `pipcat.yml`: Definiert die Services und deren Abhängigkeiten.
-- `main.py`: Hauptanwendung.
-- `audio_handler.py`: Audioverarbeitung.
-- `scratch/test_api.py`: Test-API.
+## Relevante Dateien
+- `main_livekit.py`: LiveKit-Agent-Einstiegspunkt (Room-Worker)
+- `tool_handler_livekit.py`: Tool-Logik (`check_availability`, `schedule_appointment`, `end_call`)
+- `requirements-pipcat.txt`: LiveKit-Dependencies
+- `main.py`: Direkte Gemini-Variante (Fallback, weiterhin nutzbar)
 
-## Nutzung
-1. Stelle sicher, dass pipcat installiert ist (`pip install pipcat`).
-2. Starte einen Service mit:
+## Setup
+1. Abhängigkeiten installieren:
    
-   pipcat run <service>
+   `pip install -r requirements-pipcat.txt`
 
-   Beispiel:
+2. `.env` konfigurieren:
    
-   pipcat run main
+   `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GEMINI_API_KEY`
 
-3. Weitere Services und Abhängigkeiten können in `pipcat.yml` ergänzt werden.
+   Optional:
+   `LIVEKIT_AGENT_NAME` (Default: `lavita-agent`)
+   `LIVEKIT_GEMINI_VOICE` (Default: `Kore`)
 
----
+3. Agent starten:
+   
+   `python main_livekit.py dev`
 
-Für Fragen zur Orchestrierung oder Erweiterung der Struktur, bitte im Projekt nachfragen.
+## Hinweise
+- Die Tool-Integrationen für Calendly und E-Mail bleiben erhalten.
+- Session-Reports werden weiterhin in `sessions/` geschrieben.

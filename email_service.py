@@ -29,12 +29,19 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-NOTIFICATION_EMAIL = os.getenv("NOTIFICATION_EMAIL", "karian.scheer@lavita.de")
+NOTIFICATION_EMAIL = os.getenv("NOTIFICATION_EMAIL", "karian.scheer@lavita.de, rasmus.sonst@lavita.de")
 SENDER_NAME = os.getenv("SENDER_NAME", "LaVita Terminagent")
 
 
 def is_configured() -> bool:
-    return bool(SMTP_USER and SMTP_PASSWORD)
+    # Prüfe dass echte Konfigurationswerte (nicht Platzhalter) vorhanden sind
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return False
+    # Ausschlie Platzhalter
+    if SMTP_USER == "deine@firma.de" or SMTP_PASSWORD == "dein_passwort_oder_app_kennwort":
+        logger.warning("E-Mail-Konfiguration enthält Platzhalter. Bitte .env mit echten Werten aktualisieren.")
+        return False
+    return True
 
 
 def send_appointment_proposal(
@@ -117,12 +124,27 @@ Notizen: {notes or '-'}
     msg.attach(MIMEText(html, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        logger.debug(f"Verbinde zu SMTP-Server {SMTP_HOST}:{SMTP_PORT}...")
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            logger.debug("Starte TLS...")
             server.starttls()
+            logger.debug(f"Authentifiziere als {SMTP_USER}...")
             server.login(SMTP_USER, SMTP_PASSWORD)
+            logger.debug("Versende E-Mail...")
             server.sendmail(SMTP_USER, NOTIFICATION_EMAIL, msg.as_string())
-        logger.info(f"Terminvorschlag-Mail an {NOTIFICATION_EMAIL} gesendet")
+        logger.info(f"✅ Terminvorschlag-Mail erfolgreich an {NOTIFICATION_EMAIL} gesendet")
         return True
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"❌ SMTP-Authentifizierung fehlgeschlagen (535): {e}")
+        logger.error("  → Prüfe SMTP_USER und SMTP_PASSWORD in .env")
+        logger.error("  → Für Office365: Verwende App-Passwort wenn 2FA aktiviert")
+        logger.error("  → Mail-Bestätigung konnte nicht gesendet werden, Termin aber gespeichert.")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"❌ SMTP-Fehler beim E-Mail-Versand: {e}")
+        logger.error("  → Mail-Bestätigung konnte nicht gesendet werden, Termin aber gespeichert.")
+        return False
     except Exception as e:
-        logger.error(f"E-Mail-Versand fehlgeschlagen: {e}")
+        logger.error(f"❌ Unerwarteter Fehler beim E-Mail-Versand: {e}")
+        logger.error("  → Mail-Bestätigung konnte nicht gesendet werden, Termin aber gespeichert.")
         return False
