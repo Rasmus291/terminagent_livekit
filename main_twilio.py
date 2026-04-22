@@ -27,6 +27,7 @@ import datetime
 import logging
 import time
 import wave
+from copy import deepcopy
 
 import uvicorn
 from dotenv import load_dotenv
@@ -40,9 +41,13 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
     UserTurnStoppedMessage,
     AssistantTurnStoppedMessage,
 )
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.turns.user_start import VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy
+from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
@@ -56,11 +61,12 @@ from tool_handler_pipecat import (
     handle_check_availability,
     handle_schedule_appointment,
     handle_end_call,
+    call_ended,
     crm_data_saved,
     mark_partner_farewell,
     reset_call_state,
 )
-from reporting_pipecat import save_session_report, generate_analysis
+from reporting_pipecat import save_session_report, generate_analysis, build_learning_brief
 
 load_dotenv()
 
@@ -159,9 +165,17 @@ async def twilio_websocket(websocket: WebSocket):
     )
 
     # --- LLM ---
+    runtime_settings = deepcopy(LLM_SETTINGS)
+    learning_brief = build_learning_brief(max_sessions=20)
+    if learning_brief:
+        runtime_settings.system_instruction = (
+            f"{runtime_settings.system_instruction}\n\n{learning_brief}"
+        )
+        logger.info("Lernkontext aus vergangenen Sessions geladen.")
+
     llm = GeminiLiveLLMService(
         api_key=GEMINI_API_KEY,
-        settings=LLM_SETTINGS,
+        settings=runtime_settings,
         tools=TOOLS,
     )
     llm.register_function("check_availability", handle_check_availability)
@@ -177,7 +191,17 @@ async def twilio_websocket(websocket: WebSocket):
             },
         ],
     )
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+    user_turn_stop_speech_timeout = float(os.getenv("USER_TURN_SPEECH_TIMEOUT", "0.25"))
+    user_turn_stop_timeout = float(os.getenv("USER_TURN_STOP_TIMEOUT", "0.9"))
+    user_turn_strategies = UserTurnStrategies(
+        start=[VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()],
+        stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=user_turn_stop_speech_timeout)],
+    )
+    user_params = LLMUserAggregatorParams(
+        user_turn_strategies=user_turn_strategies,
+        user_turn_stop_timeout=user_turn_stop_timeout,
+    )
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context, user_params=user_params)
 
     # --- Audio Recording ---
     audiobuffer = AudioBufferProcessor(num_channels=1)
@@ -224,6 +248,9 @@ async def twilio_websocket(websocket: WebSocket):
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn(aggregator, message: AssistantTurnStoppedMessage):
+        if call_ended.is_set():
+            logger.debug("Später Assistant-Output nach end_call ignoriert.")
+            return
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if message.content:
             logger.info(f"Agent: {message.content}")

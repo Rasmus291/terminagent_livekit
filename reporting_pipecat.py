@@ -2,10 +2,88 @@ import os
 import json
 import datetime
 import logging
+import glob
+import re
+from collections import Counter
 
 from config_pipecat import MODEL_ID
 
 logger = logging.getLogger(__name__)
+
+
+def build_learning_brief(max_sessions=20):
+    """Erzeugt kurze Lernhinweise aus vergangenen Session-Reports.
+
+    Rückgabe ist ein kompakter Textblock für den Systemkontext,
+    der NICHT vorgelesen werden soll.
+    """
+    try:
+        files = sorted(glob.glob("sessions/session_*.md"), reverse=True)[:max_sessions]
+        if not files:
+            return ""
+
+        result_counter = Counter()
+        objection_counter = Counter()
+
+        for path in files:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            result_match = re.search(r"- \*\*Ergebnis:\*\*\s*([^\n]+)", content, re.IGNORECASE)
+            if result_match:
+                result_value = result_match.group(1).strip().lower()
+                if "scheduled" in result_value:
+                    result_counter["scheduled"] += 1
+                elif "callback" in result_value:
+                    result_counter["callback"] += 1
+                elif "declined" in result_value:
+                    result_counter["declined"] += 1
+                else:
+                    result_counter["unknown"] += 1
+
+            user_lines = re.findall(r"\*\*\[[^\]]+\]\s*User:\*\*\s*(.+)", content)
+            for line in user_lines:
+                text = line.lower()
+                if any(k in text for k in ["keine zeit", "jetzt schlecht", "zu tun", "später"]):
+                    objection_counter["keine_zeit"] += 1
+                if any(k in text for k in ["kein interesse", "nicht interessiert", "nein danke"]):
+                    objection_counter["kein_interesse"] += 1
+                if any(k in text for k in ["worum", "worum geht", "infos", "informationen"]):
+                    objection_counter["worum_gehts"] += 1
+
+        total = sum(result_counter.values())
+        if total == 0:
+            return ""
+
+        lines = [
+            "Interne Lernnotizen aus vergangenen Gesprächen (nur intern, NICHT vorlesen):",
+            f"- Ausgewertete Sessions: {total}",
+            f"- Ergebnisse: scheduled={result_counter['scheduled']}, callback={result_counter['callback']}, declined={result_counter['declined']}",
+            "- Regeln: Immer direkt mit Begrüßung + Terminvorschlag starten; keine Zeitfrage am Anfang.",
+            "- Regeln: Niemals abrupt auflegen; bei Absage immer bedanken, freundlich verabschieden, dann end_call.",
+        ]
+
+        if objection_counter["keine_zeit"] > 0:
+            lines.append(
+                "- Häufiger Einwand: 'keine Zeit' → sehr kurze Rückrufoption anbieten ODER direkt höflich verabschieden."
+            )
+        if objection_counter["kein_interesse"] > 0:
+            lines.append(
+                "- Häufiger Einwand: 'kein Interesse' → nicht diskutieren, wertschätzend abschließen."
+            )
+        if objection_counter["worum_gehts"] > 0:
+            lines.append(
+                "- Häufige Rückfrage 'Worum geht es?' → in 1 Satz antworten: kurzer Austausch zur besseren Zusammenarbeit."
+            )
+
+        lines.append("- Antworte kurz, ohne lange Pausen zwischen den Sätzen.")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Lernkontext konnte nicht erstellt werden: {e}")
+        return ""
 
 
 def generate_analysis(transcript):
