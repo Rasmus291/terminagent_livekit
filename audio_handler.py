@@ -26,7 +26,7 @@ class AudioStreamer:
         self.output_queue = queue.Queue()
         self.is_running = False
         self.playback_thread = None
-        self._prebuffer_count = 3        # Chunks zu sammeln bevor Wiedergabe startet
+        self._prebuffer_count = 1        # Chunks zu sammeln bevor Wiedergabe startet
         self._turn_started = False       # Flag: Pre-Buffer abgeschlossen?
         
         # Audio-Aufzeichnung: Input fortlaufend, Output mit Zeitstempel für Synchronisation
