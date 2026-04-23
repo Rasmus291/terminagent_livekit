@@ -85,7 +85,9 @@ async def handle_schedule_appointment(params: FunctionCallParams):
     booking_url = None
     if calendly_service.is_configured() and payload.get("status") == "scheduled":
         try:
-            booking_url = await calendly_service.create_scheduling_link()
+            booking_url = await calendly_service.create_scheduling_link(
+                appointment_date=payload.get("appointment_date"),
+            )
             logger.info(f"  Calendly Buchungslink: {booking_url}")
         except Exception as e:
             logger.warning(f"  Calendly Buchungslink konnte nicht erstellt werden: {e}")
