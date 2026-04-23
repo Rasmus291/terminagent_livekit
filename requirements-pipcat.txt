@@ -5,4 +5,5 @@ python-dotenv
 # Bestehende Projekt-Services
 google-genai
 httpx
+openpyxl
 requests

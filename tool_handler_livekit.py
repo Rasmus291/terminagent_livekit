@@ -11,6 +11,7 @@ crm_data_saved: dict = {}
 partner_farewell_detected = False
 assistant_farewell_detected = False
 call_ended = asyncio.Event()
+_ALLOWED_CONTACT_METHODS = {"phone", "video"}
 
 _FAREWELL_PATTERNS = (
     r"\btsch(u|ü)ss\b",
@@ -21,6 +22,14 @@ _FAREWELL_PATTERNS = (
     r"\bsch(ö|oe)nen tag noch\b",
     r"\bciao\b",
 )
+
+
+def has_confirmed_appointment() -> bool:
+    return (
+        (crm_data_saved.get("status") or "").strip().lower() == "scheduled"
+        and bool((crm_data_saved.get("appointment_date") or "").strip())
+        and bool((crm_data_saved.get("contact_method") or "").strip())
+    )
 
 
 def reset_call_state() -> None:
@@ -91,11 +100,29 @@ async def schedule_appointment(
     notes: str = "",
 ) -> dict:
     normalized_status = (status or "").strip().lower()
+    normalized_contact_method = (contact_method or "").strip().lower()
+
+    if normalized_status == "scheduled" and has_confirmed_appointment():
+        existing_partner_name = crm_data_saved.get("partner_name", "")
+        existing_appointment_date = crm_data_saved.get("appointment_date", "")
+        existing_contact_method = crm_data_saved.get("contact_method", "")
+
+        logger.info(
+            "Termin bereits bestätigt. Ignoriere erneuten schedule_appointment-Aufruf."
+        )
+        return {
+            "status": "already_scheduled",
+            "partner_name": existing_partner_name,
+            "appointment_date": existing_appointment_date,
+            "contact_method": existing_contact_method,
+            "message": "Ein Termin steht bereits fest. Frage nicht noch einmal nach einem neuen Termin. Bestätige den bereits vereinbarten Termin kurz und verabschiede dich freundlich.",
+        }
+
     if normalized_status == "scheduled":
         missing_fields: list[str] = []
         if not (appointment_date or "").strip():
             missing_fields.append("appointment_date")
-        if not (contact_method or "").strip():
+        if not normalized_contact_method:
             missing_fields.append("contact_method")
         if missing_fields:
             logger.warning("Termin noch unvollständig, fehlende Felder: %s", ", ".join(missing_fields))
@@ -104,12 +131,19 @@ async def schedule_appointment(
                 "missing_fields": missing_fields,
                 "message": "Bitte frage noch nach fehlenden Angaben (Terminzeit und wie der Partner erreichbar sein möchte), bevor du den Termin speicherst.",
             }
+        if normalized_contact_method not in _ALLOWED_CONTACT_METHODS:
+            logger.warning("Ungültige Kontaktart für Termin: %s", contact_method)
+            return {
+                "status": "needs_more_info",
+                "missing_fields": ["contact_method"],
+                "message": "Erlaubte Kontaktarten sind nur Telefon oder Video. Frage bitte nicht nach Vor-Ort-Terminen.",
+            }
 
     payload = {
         "partner_name": partner_name,
         "status": normalized_status or status,
         "appointment_date": appointment_date,
-        "contact_method": contact_method,
+        "contact_method": normalized_contact_method or contact_method,
         "notes": notes,
     }
     crm_data_saved.update(payload)
