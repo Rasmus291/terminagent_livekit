@@ -17,8 +17,10 @@ Benötigt in .env:
 import os
 import logging
 import smtplib
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -42,6 +44,82 @@ def is_configured() -> bool:
         logger.warning("E-Mail-Konfiguration enthält Platzhalter. Bitte .env mit echten Werten aktualisieren.")
         return False
     return True
+
+
+def _parse_appointment_datetime(date_str: str) -> datetime | None:
+    """Parst den Termin-String in ein datetime-Objekt."""
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S",
+                "%d.%m.%Y %H:%M", "%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _build_google_calendar_link(
+    partner_name: str,
+    appointment_date: str,
+    contact_method: str,
+    notes: str,
+) -> str | None:
+    """Erstellt einen Google Calendar One-Click-Link."""
+    dt = _parse_appointment_datetime(appointment_date)
+    if not dt:
+        return None
+
+    start = dt.strftime("%Y%m%dT%H%M%S")
+    end = (dt + timedelta(hours=1)).strftime("%Y%m%dT%H%M%S")
+
+    contact_display = {"phone": "Telefon", "video": "Video-Call", "in_person": "Vor Ort"}.get(
+        contact_method, contact_method or ""
+    )
+    title = f"Termin mit {partner_name}"
+    details = f"Kontaktart: {contact_display}"
+    if notes:
+        details += f"\nNotizen: {notes}"
+
+    params = (
+        f"action=TEMPLATE"
+        f"&text={quote(title)}"
+        f"&dates={start}/{end}"
+        f"&details={quote(details)}"
+        f"&ctz=Europe/Berlin"
+    )
+    return f"https://calendar.google.com/calendar/render?{params}"
+
+
+def _build_outlook_calendar_link(
+    partner_name: str,
+    appointment_date: str,
+    contact_method: str,
+    notes: str,
+) -> str | None:
+    """Erstellt einen Outlook Web One-Click-Link."""
+    dt = _parse_appointment_datetime(appointment_date)
+    if not dt:
+        return None
+
+    start = dt.strftime("%Y-%m-%dT%H:%M:%S")
+    end = (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    contact_display = {"phone": "Telefon", "video": "Video-Call", "in_person": "Vor Ort"}.get(
+        contact_method, contact_method or ""
+    )
+    title = f"Termin mit {partner_name}"
+    body = f"Kontaktart: {contact_display}"
+    if notes:
+        body += f"\nNotizen: {notes}"
+
+    params = (
+        f"path=/calendar/action/compose"
+        f"&rru=addevent"
+        f"&subject={quote(title)}"
+        f"&startdt={start}"
+        f"&enddt={end}"
+        f"&body={quote(body)}"
+    )
+    return f"https://outlook.office.com/calendar/0/deeplink/compose?{params}"
 
 
 def send_appointment_proposal(
@@ -75,6 +153,27 @@ def send_appointment_proposal(
         "in_person": "Vor Ort",
     }.get(contact_method, contact_method or "Nicht angegeben")
 
+    # Kalender-Links aufbauen (nur bei vereinbartem Termin mit Datum)
+    google_cal_link = None
+    outlook_cal_link = None
+    if status == "scheduled" and appointment_date:
+        google_cal_link = _build_google_calendar_link(partner_name, appointment_date, contact_method, notes)
+        outlook_cal_link = _build_outlook_calendar_link(partner_name, appointment_date, contact_method, notes)
+
+    # Kalender-Buttons HTML
+    calendar_buttons_html = ""
+    if google_cal_link or outlook_cal_link or (calendly_link and status == "scheduled"):
+        button_style = "display: inline-block; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 5px 5px 5px 0; font-size: 14px;"
+        calendar_buttons_html = '<div style="margin: 20px 0;">'
+        calendar_buttons_html += '<p style="font-weight: bold; margin-bottom: 10px;">Termin direkt eintragen:</p>'
+        if google_cal_link:
+            calendar_buttons_html += f'<a href="{google_cal_link}" style="{button_style} background-color: #4285F4;">📅 Google Calendar</a> '
+        if outlook_cal_link:
+            calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Outlook</a> '
+        if calendly_link and status == "scheduled":
+            calendar_buttons_html += f'<a href="{calendly_link}" style="{button_style} background-color: #2c5530;">📅 Calendly</a>'
+        calendar_buttons_html += '</div>'
+
     # HTML E-Mail
     html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -97,7 +196,7 @@ def send_appointment_proposal(
             {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Notizen</td><td style="padding: 10px;">' + notes + '</td></tr>' if notes else ''}
         </table>
 
-        {f'<p><a href="{calendly_link}" style="display: inline-block; background-color: #2c5530; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 0;">✅ Termin in Calendly bestätigen</a></p>' if calendly_link and status == 'scheduled' else ''}
+        {calendar_buttons_html}
 
         <p style="color: #888; font-size: 12px; margin-top: 30px;">
             Diese E-Mail wurde automatisch vom LaVita Terminagent erstellt.
@@ -113,7 +212,9 @@ Status: {status}
 Datum: {appointment_date or 'Nicht festgelegt'}
 Kontaktart: {contact_display}
 Notizen: {notes or '-'}
-{f'Calendly-Link: {calendly_link}' if calendly_link else ''}
+{f'Google Calendar: {google_cal_link}' if google_cal_link else ''}
+{f'Outlook: {outlook_cal_link}' if outlook_cal_link else ''}
+{f'Calendly: {calendly_link}' if calendly_link else ''}
 """
 
     msg = MIMEMultipart("alternative")
