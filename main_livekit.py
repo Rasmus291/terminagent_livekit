@@ -83,6 +83,7 @@ async def lavita_agent(ctx: JobContext):
     session_start_time = datetime.datetime.now()
     session_start_perf = time.perf_counter()
     assistant_spoke = False
+    assistant_started_event = asyncio.Event()
 
     learning_brief = build_learning_brief(max_sessions=20)
     runtime_instruction = SYSTEM_INSTRUCTION
@@ -92,7 +93,8 @@ async def lavita_agent(ctx: JobContext):
     runtime_instruction = (
         f"{runtime_instruction}\n\n"
         "AKTUELLER KONTEXT: Der Partner ist bereits in der Leitung. "
-        "Beginne jetzt proaktiv mit Begrüßung und Terminvorschlag."
+        "Beginne jetzt proaktiv mit Begrüßung und kurzem Anliegen. "
+        "Mache noch keinen konkreten Terminslot in der ersten Aussage."
     )
 
     agent = LaVitaLiveKitAgent(instructions=runtime_instruction)
@@ -131,6 +133,7 @@ async def lavita_agent(ctx: JobContext):
         elif role == "assistant":
             nonlocal assistant_spoke
             assistant_spoke = True
+            assistant_started_event.set()
             logger.info("Agent: %s", text)
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
@@ -223,37 +226,26 @@ async def lavita_agent(ctx: JobContext):
             logger.error(f"Fehler beim Session-Start: {e}", exc_info=True)
             raise
 
-        await asyncio.sleep(0.6)
-        if not assistant_spoke:
-            logger.info("Stoße Gesprächseröffnung aktiv an...")
-            try:
-                session.generate_reply(
-                    user_input=(
-                        f"{_START_TRIGGER_PREFIX} Der Partner ist jetzt verbunden. "
-                        "Begrüße ihn zuerst und beginne sofort mit einem klaren kurzen Terminvorschlag. "
-                        "Verwende dabei jetzt keine Tools."
-                    ),
-                    tools=[],
-                    input_modality="text",
-                )
-            except Exception as e:
-                logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
+        try:
+            await asyncio.wait_for(assistant_started_event.wait(), timeout=2.5)
+            logger.info("Agent-Eröffnung bereits erkannt - kein Start-Trigger nötig.")
+            return
+        except asyncio.TimeoutError:
+            logger.info("Noch keine Agent-Eröffnung erkannt. Stoße Gesprächseröffnung einmalig an...")
 
-        await asyncio.sleep(1.6)
-        if not assistant_spoke:
-            logger.warning("Noch keine Agent-Eröffnung erkannt. Wiederhole Start-Trigger.")
-            try:
-                session.generate_reply(
-                    user_input=(
-                        f"{_START_TRIGGER_PREFIX} Starte jetzt selbst das Gespräch. "
-                        "Begrüße den Partner und mache direkt einen konkreten Terminvorschlag. "
-                        "Verwende dabei keine Tools."
-                    ),
-                    tools=[],
-                    input_modality="text",
-                )
-            except Exception as e:
-                logger.warning("Zweiter Start-Trigger fehlgeschlagen: %s", e)
+        try:
+            session.generate_reply(
+                user_input=(
+                    f"{_START_TRIGGER_PREFIX} Der Partner ist jetzt verbunden. "
+                    "Begrüße ihn zuerst und nenne kurz das Anliegen. "
+                    "Mache in der ersten Aussage keinen konkreten Terminslot. "
+                    "Verwende dabei jetzt keine Tools."
+                ),
+                tools=[],
+                input_modality="text",
+            )
+        except Exception as e:
+            logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
 
     # Starte Session und End-Call Monitor parallel
     logger.info("Starte Agent-Loop (session + end_call_monitor)...")
