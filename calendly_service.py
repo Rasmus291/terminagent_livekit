@@ -174,9 +174,14 @@ async def format_available_slots(days_ahead: int = 5) -> str:
     return "\n".join(lines)
 
 
-async def create_scheduling_link() -> str | None:
+async def create_scheduling_link(appointment_date: str | None = None) -> str | None:
     """
     Erstellt einen Einmal-Buchungslink für den Event Type.
+
+    Args:
+        appointment_date: Vereinbartes Datum (z.B. "2026-04-25 10:00" oder ISO-Format).
+                          Wird als ?date=YYYY-MM-DD an die URL angehängt, damit die
+                          Calendly-Seite direkt beim richtigen Tag öffnet.
 
     Returns:
         Booking-URL oder None bei Fehler.
@@ -196,5 +201,25 @@ async def create_scheduling_link() -> str | None:
         resp.raise_for_status()
         booking_url = resp.json()["resource"]["booking_url"]
 
+    # Datum als Query-Parameter anhängen, damit Calendly den richtigen Tag vorauswählt
+    if appointment_date:
+        try:
+            dt = _parse_appointment_date(appointment_date)
+            if dt:
+                booking_url += f"?date={dt.strftime('%Y-%m-%d')}"
+        except Exception:
+            pass  # Kein Datum-Parameter, Link funktioniert trotzdem
+
     logger.info(f"Calendly Buchungslink erstellt: {booking_url}")
     return booking_url
+
+
+def _parse_appointment_date(date_str: str) -> datetime | None:
+    """Parst verschiedene Datumsformate in ein datetime-Objekt."""
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S",
+                "%d.%m.%Y %H:%M", "%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
