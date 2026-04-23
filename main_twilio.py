@@ -28,6 +28,7 @@ import logging
 import time
 import wave
 from copy import deepcopy
+from urllib.parse import urlencode
 
 import uvicorn
 from dotenv import load_dotenv
@@ -57,6 +58,7 @@ from pipecat.transports.websocket.fastapi import (
 )
 
 from config_pipecat import GEMINI_API_KEY, LLM_SETTINGS, TOOLS
+from contacts_excel import find_contact, get_contacts_excel_path, load_contacts, normalize_phone
 from tool_handler_pipecat import (
     handle_check_availability,
     handle_schedule_appointment,
@@ -98,12 +100,22 @@ async def twilio_incoming(request: Request):
     # Verwende wss:// wenn hinter einem Proxy (ngrok, etc.)
     ws_scheme = "wss" if request.headers.get("x-forwarded-proto") == "https" else "ws"
     ws_url = f"{ws_scheme}://{host}/twilio/ws"
+    contact_name = (request.query_params.get("contact_name") or "").strip()
+    contact_first_name = (request.query_params.get("contact_first_name") or "").strip()
+    contact_company = (request.query_params.get("contact_company") or "").strip()
+    contact_notes = (request.query_params.get("contact_notes") or "").strip()
+    contact_id = (request.query_params.get("contact_id") or "").strip()
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
         <Stream url="{ws_url}">
             <Parameter name="caller_id" value="{{{{From}}}}" />
+            <Parameter name="contact_name" value="{contact_name}" />
+            <Parameter name="contact_first_name" value="{contact_first_name}" />
+            <Parameter name="contact_company" value="{contact_company}" />
+            <Parameter name="contact_notes" value="{contact_notes}" />
+            <Parameter name="contact_id" value="{contact_id}" />
         </Stream>
     </Connect>
 </Response>"""
@@ -130,9 +142,17 @@ async def twilio_websocket(websocket: WebSocket):
     start_msg = await websocket.receive_json()
     stream_sid = start_msg.get("streamSid", "")
     call_sid = start_msg.get("start", {}).get("callSid", "")
-    caller_id = start_msg.get("start", {}).get("customParameters", {}).get("caller_id", "unbekannt")
+    custom_parameters = start_msg.get("start", {}).get("customParameters", {})
+    caller_id = custom_parameters.get("caller_id", "unbekannt")
+    contact_name = custom_parameters.get("contact_name", "")
+    contact_first_name = custom_parameters.get("contact_first_name", "")
+    contact_company = custom_parameters.get("contact_company", "")
+    contact_notes = custom_parameters.get("contact_notes", "")
+    contact_id = custom_parameters.get("contact_id", "")
 
-    logger.info(f"Twilio Stream gestartet: stream_sid={stream_sid}, call_sid={call_sid}, caller={caller_id}")
+    logger.info(
+        f"Twilio Stream gestartet: stream_sid={stream_sid}, call_sid={call_sid}, caller={caller_id}, contact={contact_name or '-'}, contact_id={contact_id or '-'}"
+    )
 
     # Session-Tracking
     session_transcript = []
@@ -173,6 +193,24 @@ async def twilio_websocket(websocket: WebSocket):
         )
         logger.info("Lernkontext aus vergangenen Sessions geladen.")
 
+    if contact_name:
+        personalized_context = [
+            "KONTAKTKONTEXT FÜR DIESEN ANRUF:",
+            f"- Der angerufene Partner heißt: {contact_name}",
+        ]
+        if contact_first_name:
+            personalized_context.append(f"- Vorname: {contact_first_name}")
+        if contact_company:
+            personalized_context.append(f"- Firma: {contact_company}")
+        if contact_notes:
+            personalized_context.append(f"- Notizen: {contact_notes}")
+        personalized_context.append(
+            "- Begrüße diese Person direkt mit Namen. Frage nicht nach dem Namen, sofern der Partner nichts anderes sagt."
+        )
+        runtime_settings.system_instruction = (
+            f"{runtime_settings.system_instruction}\n\n" + "\n".join(personalized_context)
+        )
+
     llm = GeminiLiveLLMService(
         api_key=GEMINI_API_KEY,
         settings=runtime_settings,
@@ -183,11 +221,18 @@ async def twilio_websocket(websocket: WebSocket):
     llm.register_function("end_call", handle_end_call)
 
     # --- Context ---
+    initial_prompt = "Der Partner hat gerade abgenommen. Begrüße ihn jetzt und starte das Gespräch."
+    if contact_name:
+        initial_prompt = (
+            f"Der Partner hat gerade abgenommen. Sein Name ist {contact_name}. "
+            "Begrüße ihn direkt mit Namen und starte das Gespräch."
+        )
+
     context = LLMContext(
         [
             {
                 "role": "user",
-                "content": "Der Partner hat gerade abgenommen. Begrüße ihn jetzt und starte das Gespräch.",
+                "content": initial_prompt,
             },
         ],
     )
@@ -317,7 +362,7 @@ async def initiate_call(request: Request):
     """REST-Endpoint um einen ausgehenden Anruf zu starten.
 
     POST /twilio/call
-    Body: {"to": "+49170XXXXXXX"}
+    Body: {"to": "+49170XXXXXXX"} oder {"contact_id": "1"}
     """
     try:
         from twilio.rest import Client as TwilioClient
@@ -328,9 +373,32 @@ async def initiate_call(request: Request):
         )
 
     body = await request.json()
+    contact_id = body.get("contact_id")
     to_number = body.get("to")
+    contact = None
+
+    if contact_id:
+        try:
+            contact = find_contact(contact_id=str(contact_id))
+        except Exception as exc:
+            return PlainTextResponse(content=f"Kontakte konnten nicht geladen werden: {exc}", status_code=500)
+        if not contact:
+            return PlainTextResponse(content=f"Kontakt mit ID {contact_id} nicht gefunden", status_code=404)
+        if not to_number:
+            to_number = contact.get("phone", "")
+
+    if to_number and not contact:
+        try:
+            contact = find_contact(phone=to_number)
+        except Exception:
+            contact = None
+
     if not to_number:
-        return PlainTextResponse(content="'to' Telefonnummer fehlt", status_code=400)
+        return PlainTextResponse(content="'to' Telefonnummer oder 'contact_id' fehlt", status_code=400)
+
+    to_number = normalize_phone(to_number)
+    if not to_number:
+        return PlainTextResponse(content="Telefonnummer konnte nicht normalisiert werden", status_code=400)
 
     if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
         return PlainTextResponse(
@@ -340,7 +408,18 @@ async def initiate_call(request: Request):
 
     host = request.headers.get("host", f"{HOST}:{PORT}")
     scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
+    query = {}
+    if contact:
+        query = {
+            "contact_id": contact.get("contact_id", ""),
+            "contact_name": contact.get("name", ""),
+            "contact_first_name": contact.get("first_name", ""),
+            "contact_company": contact.get("company", ""),
+            "contact_notes": contact.get("notes", ""),
+        }
     webhook_url = f"{scheme}://{host}/twilio/incoming"
+    if query:
+        webhook_url = f"{webhook_url}?{urlencode(query)}"
 
     client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     call = client.calls.create(
@@ -351,8 +430,29 @@ async def initiate_call(request: Request):
         machine_detection_timeout=5,
     )
 
-    logger.info(f"Ausgehender Anruf gestartet: {call.sid} → {to_number}")
-    return {"call_sid": call.sid, "status": call.status, "to": to_number}
+    logger.info(
+        f"Ausgehender Anruf gestartet: {call.sid} → {to_number} ({contact.get('name', 'ohne Kontaktname') if contact else 'ohne Kontaktname'})"
+    )
+    return {
+        "call_sid": call.sid,
+        "status": call.status,
+        "to": to_number,
+        "contact": contact,
+    }
+
+
+@app.get("/twilio/contacts")
+async def list_contacts():
+    try:
+        contacts = load_contacts()
+    except Exception as exc:
+        return PlainTextResponse(content=f"Kontakte konnten nicht geladen werden: {exc}", status_code=500)
+
+    return {
+        "excel_path": get_contacts_excel_path(),
+        "count": len(contacts),
+        "contacts": contacts,
+    }
 
 
 @app.get("/health")
