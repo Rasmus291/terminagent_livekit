@@ -82,7 +82,6 @@ async def lavita_agent(ctx: JobContext):
     session_transcript: list[str] = []
     session_start_time = datetime.datetime.now()
     session_start_perf = time.perf_counter()
-    assistant_spoke = False
     assistant_started_event = asyncio.Event()
 
     learning_brief = build_learning_brief(max_sessions=20)
@@ -105,7 +104,6 @@ async def lavita_agent(ctx: JobContext):
             api_key=GEMINI_API_KEY,
             instructions=runtime_instruction,
             language="de-DE",
-            proactivity=True,
         ),
         vad=silero.VAD.load(),
     )
@@ -131,8 +129,6 @@ async def lavita_agent(ctx: JobContext):
             logger.info("Rufe mark_partner_farewell auf mit: '%s'", text)
             mark_partner_farewell(text)
         elif role == "assistant":
-            nonlocal assistant_spoke
-            assistant_spoke = True
             assistant_started_event.set()
             logger.info("Agent: %s", text)
             session_transcript.append(f"**[{ts}] Agent:** {text}")
@@ -217,7 +213,7 @@ async def lavita_agent(ctx: JobContext):
             return
 
     async def run_session():
-        """Startet die Session und stößt die Gesprächseröffnung aktiv an."""
+        """Startet die Session und stößt die Gesprächseröffnung genau einmal aktiv an."""
         logger.info("Starte Gemini Live Session...")
         try:
             await session.start(room=ctx.room, agent=agent)
@@ -226,19 +222,15 @@ async def lavita_agent(ctx: JobContext):
             logger.error(f"Fehler beim Session-Start: {e}", exc_info=True)
             raise
 
+        await asyncio.sleep(0.6)
         try:
-            await asyncio.wait_for(assistant_started_event.wait(), timeout=2.5)
-            logger.info("Agent-Eröffnung bereits erkannt - kein Start-Trigger nötig.")
-            return
-        except asyncio.TimeoutError:
-            logger.info("Noch keine Agent-Eröffnung erkannt. Stoße Gesprächseröffnung einmalig an...")
-
-        try:
+            logger.info("Stoße Gesprächseröffnung einmalig an...")
             session.generate_reply(
                 user_input=(
                     f"{_START_TRIGGER_PREFIX} Der Partner ist jetzt verbunden. "
                     "Begrüße ihn zuerst und nenne kurz das Anliegen. "
                     "Mache in der ersten Aussage keinen konkreten Terminslot. "
+                    "Nenne niemals interne Tool-Namen wie end_call oder schedule_appointment. "
                     "Verwende dabei jetzt keine Tools."
                 ),
                 tools=[],
@@ -246,6 +238,25 @@ async def lavita_agent(ctx: JobContext):
             )
         except Exception as e:
             logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
+
+        try:
+            await asyncio.wait_for(assistant_started_event.wait(), timeout=4.0)
+            logger.info("Agent hat Gesprächseröffnung geliefert.")
+        except asyncio.TimeoutError:
+            logger.warning("Keine Agent-Eröffnung erkannt. Einmaliger Fallback-Trigger...")
+            try:
+                session.generate_reply(
+                    user_input=(
+                        f"{_START_TRIGGER_PREFIX} Bitte starte jetzt sofort das Gespräch. "
+                        "Begrüße den Partner freundlich und nenne kurz das Anliegen. "
+                        "Mache in der ersten Aussage keinen konkreten Terminslot. "
+                        "Verwende dabei jetzt keine Tools."
+                    ),
+                    tools=[],
+                    input_modality="text",
+                )
+            except Exception as e:
+                logger.warning("Fallback-Start-Trigger fehlgeschlagen: %s", e)
 
     # Starte Session und End-Call Monitor parallel
     logger.info("Starte Agent-Loop (session + end_call_monitor)...")

@@ -14,7 +14,7 @@ Benötigt in .env:
 import os
 import logging
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -40,6 +40,24 @@ BOOKING_TIMEZONE = "Europe/Berlin"
 # Wird beim ersten Aufruf gecacht
 _user_uri: str | None = None
 _event_type_uri: str | None = None
+_booking_tz: ZoneInfo | timezone | None = None
+
+
+def _get_booking_timezone() -> ZoneInfo | timezone:
+    global _booking_tz
+    if _booking_tz is not None:
+        return _booking_tz
+
+    try:
+        _booking_tz = ZoneInfo(BOOKING_TIMEZONE)
+        return _booking_tz
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Zeitzone '%s' nicht verfügbar. Fallback auf UTC+1.",
+            BOOKING_TIMEZONE,
+        )
+        _booking_tz = timezone(timedelta(hours=1))
+        return _booking_tz
 
 
 def _headers() -> dict[str, str]:
@@ -124,7 +142,7 @@ async def get_available_slots(days_ahead: int = 5) -> list[dict]:
     logger.info(f"Calendly: {len(slots)} verfügbare Slots in den nächsten {days_ahead} Tagen")
 
     # Nur Slots innerhalb der Bürozeiten (lokale Zeit) behalten
-    tz = ZoneInfo(BOOKING_TIMEZONE)
+    tz = _get_booking_timezone()
     filtered = []
     for slot in slots:
         start_local = datetime.fromisoformat(slot["start_time"]).astimezone(tz)
@@ -156,7 +174,7 @@ async def format_available_slots(days_ahead: int = 5) -> str:
         return "Keine freien Termine in den nächsten Tagen gefunden."
 
     # Gruppiere nach Tag (deutsche Zeitzone)
-    tz = ZoneInfo(BOOKING_TIMEZONE)
+    tz = _get_booking_timezone()
     days: dict[str, list[str]] = {}
     for slot in slots:
         start = datetime.fromisoformat(slot["start_time"]).astimezone(tz)
