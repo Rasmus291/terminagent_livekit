@@ -82,6 +82,7 @@ async def lavita_agent(ctx: JobContext):
     session_transcript: list[str] = []
     session_start_time = datetime.datetime.now()
     session_start_perf = time.perf_counter()
+    session_timestamp = session_start_time.strftime("%Y%m%d_%H%M%S")
     assistant_started_event = asyncio.Event()
 
     learning_brief = build_learning_brief(max_sessions=20)
@@ -160,6 +161,7 @@ async def lavita_agent(ctx: JobContext):
             call_duration=call_duration,
             call_start_time=call_start_str,
             analysis=analysis,
+            timestamp=session_timestamp,
         )
         if reason:
             logger.info("Session beendet (%s).", reason)

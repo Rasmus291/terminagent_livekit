@@ -108,7 +108,8 @@ async def main():
             latency_data=latency_measurements,
             call_duration=call_duration,
             call_start_time=call_start_str,
-            analysis=analysis
+            analysis=analysis,
+            timestamp=session_timestamp
         )
 
 
