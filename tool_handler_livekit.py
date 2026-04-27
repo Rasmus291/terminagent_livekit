@@ -11,7 +11,17 @@ crm_data_saved: dict = {}
 partner_farewell_detected = False
 assistant_farewell_detected = False
 call_ended = asyncio.Event()
+pending_end_call = False
 _ALLOWED_CONTACT_METHODS = {"phone", "video"}
+_CONTACT_METHOD_ALIASES = {
+    "telefon": "phone",
+    "telefonisch": "phone",
+    "phone": "phone",
+    "anruf": "phone",
+    "video": "video",
+    "videocall": "video",
+    "video call": "video",
+}
 
 _FAREWELL_PATTERNS = (
     r"\btsch(u|ü)ss\b",
@@ -19,6 +29,8 @@ _FAREWELL_PATTERNS = (
     r"\bauf wiedersehen\b",
     r"\bbis dann\b",
     r"\bbis bald\b",
+    r"\bbis zum termin\b",
+    r"\bvielen dank\b",
     r"\bsch(ö|oe)nen tag noch\b",
     r"\bciao\b",
 )
@@ -33,9 +45,10 @@ def has_confirmed_appointment() -> bool:
 
 
 def reset_call_state() -> None:
-    global partner_farewell_detected, assistant_farewell_detected
+    global partner_farewell_detected, assistant_farewell_detected, pending_end_call
     partner_farewell_detected = False
     assistant_farewell_detected = False
+    pending_end_call = False
     crm_data_saved.clear()
     call_ended.clear()
 
@@ -59,6 +72,9 @@ def mark_partner_farewell(text: str) -> bool:
         if re.search(pattern, normalized):
             partner_farewell_detected = True
             logger.info("Partner-Verabschiedung erkannt.")
+            if pending_end_call and not call_ended.is_set():
+                logger.info("Partner-Verabschiedung nach früherem end_call erkannt. Beende Gespräch jetzt.")
+                call_ended.set()
             _trigger_end_if_both_farewells("partner")
             return True
     return False
@@ -100,7 +116,11 @@ async def schedule_appointment(
     notes: str = "",
 ) -> dict:
     normalized_status = (status or "").strip().lower()
-    normalized_contact_method = (contact_method or "").strip().lower()
+    normalized_contact_method_raw = (contact_method or "").strip().lower()
+    normalized_contact_method = _CONTACT_METHOD_ALIASES.get(
+        normalized_contact_method_raw,
+        normalized_contact_method_raw,
+    )
 
     if normalized_status == "scheduled" and has_confirmed_appointment():
         existing_partner_name = crm_data_saved.get("partner_name", "")
@@ -171,7 +191,7 @@ async def schedule_appointment(
     email_sent = email_service.send_appointment_proposal(
         partner_name=partner_name or "Unbekannt",
         appointment_date=appointment_date or "",
-        contact_method=contact_method or "",
+        contact_method=normalized_contact_method or "",
         notes=notes or "",
         status=effective_status or "scheduled",
         calendly_link=booking_url,
@@ -195,14 +215,16 @@ async def end_call(reason: str = "completed") -> dict:
     Returns:
         Dict mit Status und Nachricht
     """
+    global pending_end_call
     logger.info(f"end_call() aufgerufen. partner_farewell_detected={partner_farewell_detected}, reason={reason}")
     
     if not partner_farewell_detected:
+        pending_end_call = True
         logger.warning("❌ EndCall-Request erhalten, aber Partner hat sich nicht verabschiedet.")
         return {
             "status": "deferred",
             "reason": "waiting_for_partner_farewell",
-            "message": "Partner hat sich noch nicht verabschiedet. Bitte freundlich abschließen und auf Verabschiedung warten.",
+            "message": "Partner hat sich noch nicht verabschiedet. Bitte freundlich abschließen und dann still sein.",
         }
 
     logger.info("=" * 60)
@@ -215,6 +237,7 @@ async def end_call(reason: str = "completed") -> dict:
     
     # Signalisiere dem Main-Loop dass Auflegen bestätigt ist
     logger.info("Setze call_ended Event...")
+    pending_end_call = False
     call_ended.set()
     logger.info(f"call_ended.is_set() = {call_ended.is_set()}")
     
