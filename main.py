@@ -24,8 +24,17 @@ _FAREWELL_PATTERNS = (
     "wiedersehen",
     "bis zum termin",
     "bis dann",
+    "bis bald",
+    "bis später",
+    "schönen tag",
+    "schönen tag noch",
+    "einen schönen tag",
+    "alles gute",
+    "machs gut",
+    "mach's gut",
+    "ciao",
+    "servus",
 )
-
 
 def _is_farewell_text(text: str) -> bool:
     if not text:
