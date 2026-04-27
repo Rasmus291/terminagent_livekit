@@ -20,7 +20,6 @@ Twilio Webhook URL setzen auf:
   https://<ngrok-url>/twilio/incoming
 """
 
-import io
 import os
 import asyncio
 import datetime
@@ -249,38 +248,37 @@ async def twilio_websocket(websocket: WebSocket):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context, user_params=user_params)
 
     # --- Audio Recording ---
-    audiobuffer = AudioBufferProcessor(num_channels=1)
+    audiobuffer = AudioBufferProcessor(sample_rate=16000, num_channels=1)
+    recording_user_audio = bytearray()
+    recording_agent_audio = bytearray()
+    recording_mono_audio = bytearray()
+    recording_sample_rate = 16000
+
+    def write_wav(path, audio_bytes, sample_rate, num_channels=1):
+        if not audio_bytes:
+            return
+        os.makedirs("sessions", exist_ok=True)
+        with wave.open(path, "wb") as wf:
+            wf.setsampwidth(2)
+            wf.setnchannels(num_channels)
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio_bytes)
 
     @audiobuffer.event_handler("on_track_audio_data")
     async def on_track_audio_data(buffer, user_audio, bot_audio, sample_rate, num_channels):
-        os.makedirs("sessions", exist_ok=True)
+        nonlocal recording_sample_rate
+        recording_sample_rate = sample_rate or recording_sample_rate
         if len(user_audio) > 0:
-            user_path = f"sessions/recording_user_{session_timestamp}.wav"
-            with wave.open(user_path, "wb") as wf:
-                wf.setsampwidth(2)
-                wf.setnchannels(1)
-                wf.setframerate(sample_rate)
-                wf.writeframes(user_audio)
-            logger.info(f"User-Audio gespeichert: {user_path}")
+            recording_user_audio.extend(user_audio)
         if len(bot_audio) > 0:
-            bot_path = f"sessions/recording_agent_{session_timestamp}.wav"
-            with wave.open(bot_path, "wb") as wf:
-                wf.setsampwidth(2)
-                wf.setnchannels(1)
-                wf.setframerate(sample_rate)
-                wf.writeframes(bot_audio)
-            logger.info(f"Agent-Audio gespeichert: {bot_path}")
+            recording_agent_audio.extend(bot_audio)
 
     @audiobuffer.event_handler("on_audio_data")
     async def on_audio_data(buffer, audio, sample_rate, num_channels):
+        nonlocal recording_sample_rate
+        recording_sample_rate = sample_rate or recording_sample_rate
         if len(audio) > 0:
-            mono_path = f"sessions/recording_{session_timestamp}.wav"
-            with wave.open(mono_path, "wb") as wf:
-                wf.setsampwidth(2)
-                wf.setnchannels(1)
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio)
-            logger.info(f"Mono-Aufnahme gespeichert: {mono_path}")
+            recording_mono_audio.extend(audio)
 
     # --- Transkription ---
     @user_aggregator.event_handler("on_user_turn_stopped")
@@ -339,12 +337,42 @@ async def twilio_websocket(websocket: WebSocket):
     try:
         await runner.run(task)
     finally:
+        try:
+            await audiobuffer.stop_recording()
+        except Exception as e:
+            logger.warning("Audio-Aufnahme konnte nicht sauber beendet werden: %s", e)
+
+        mono_path = f"sessions/recording_{session_timestamp}.wav"
+        user_path = f"sessions/recording_user_{session_timestamp}.wav"
+        agent_path = f"sessions/recording_agent_{session_timestamp}.wav"
+
+        write_wav(mono_path, recording_mono_audio, recording_sample_rate, num_channels=1)
+        write_wav(user_path, recording_user_audio, recording_sample_rate, num_channels=1)
+        write_wav(agent_path, recording_agent_audio, recording_sample_rate, num_channels=1)
+
+        if recording_mono_audio:
+            logger.info("Mono-Aufnahme gespeichert: %s", mono_path)
+        if recording_user_audio:
+            logger.info("User-Audio gespeichert: %s", user_path)
+        if recording_agent_audio:
+            logger.info("Agent-Audio gespeichert: %s", agent_path)
+
         # Session Report
         call_duration = time.perf_counter() - session_start_perf
         call_start_str = session_start_time.strftime("%Y-%m-%d %H:%M:%S")
 
         logger.info("Generiere Analyse...")
-        analysis = generate_analysis(session_transcript)
+        try:
+            analysis = await asyncio.to_thread(generate_analysis, session_transcript)
+        except Exception as e:
+            logger.error("Analyse fehlgeschlagen: %s", e, exc_info=True)
+            analysis = {
+                "zusammenfassung": f"*Analyse-Fehler: {e}*",
+                "sentiment_partner": None,
+                "sentiment_gesamt": "unbekannt",
+                "stimmung_details": "",
+                "ergebnis": "unbekannt",
+            }
 
         logger.info("Speichere Session Report...")
         save_session_report(
@@ -353,6 +381,7 @@ async def twilio_websocket(websocket: WebSocket):
             call_duration=call_duration,
             call_start_time=call_start_str,
             analysis=analysis,
+            timestamp=session_timestamp,
         )
         logger.info(f"Call beendet. Dauer: {call_duration:.0f}s, Caller: {caller_id}")
 
