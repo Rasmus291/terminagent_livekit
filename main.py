@@ -10,6 +10,7 @@ from google.genai import types
 
 from config import GEMINI_API_KEY, MODEL_ID, LIVE_CONFIG
 from audio_handler import AudioStreamer
+import email_service
 from reporting import save_session_report, generate_analysis
 from response_handler import ResponseHandler
 
@@ -93,6 +94,14 @@ async def main():
         async with client.aio.live.connect(model=MODEL_ID, config=LIVE_CONFIG) as session:
             logger.info("Session gestartet. Du kannst jetzt sprechen.")
 
+            logger.info("Sende sofortigen Begrüßungs-Trigger...")
+            await session.send_client_content(
+                turns=types.Content(role="user", parts=[types.Part.from_text(
+                    text="Der Partner hat gerade abgenommen. Begrüße ihn jetzt und starte das Gespräch."
+                )]),
+                turn_complete=True
+            )
+
             async def send_audio():
                 async for chunk in audio_streamer.get_input_stream():
                     await session.send_realtime_input(audio=types.Blob(
@@ -100,16 +109,6 @@ async def main():
                         data=chunk
                     ))
                     handler.last_audio_sent_time = time.perf_counter()
-
-            async def trigger_greeting():
-                await asyncio.sleep(0.15)
-                logger.info("Sende Begrüßungs-Trigger...")
-                await session.send_client_content(
-                    turns=types.Content(role="user", parts=[types.Part.from_text(
-                        text="Der Partner hat gerade abgenommen. Begrüße ihn jetzt und starte das Gespräch."
-                    )]),
-                    turn_complete=True
-                )
 
             async def receive_responses():
                 appointment_done = False
@@ -131,7 +130,7 @@ async def main():
                         logger.info("Beidseitige Verabschiedung erkannt. Beende Gespräch nach Turn-Abschluss.")
                         raise asyncio.CancelledError("Mutual farewell detected")
 
-            await asyncio.gather(send_audio(), receive_responses(), trigger_greeting())
+            await asyncio.gather(send_audio(), receive_responses())
 
     except asyncio.CancelledError:
         logger.info("Session beendet.")
@@ -154,18 +153,36 @@ async def main():
         call_start_str = session_start_time.strftime('%Y-%m-%d %H:%M:%S')
 
         logger.info("Generiere Analyse + Sentiment...")
-        analysis = await generate_analysis(client, session_transcript)
+        try:
+            analysis = await generate_analysis(client, session_transcript)
+        except Exception as e:
+            logger.error("Analyse fehlgeschlagen: %s", e)
+            analysis = {"zusammenfassung": f"*Analyse-Fehler: {e}*", "sentiment_gesamt": "unbekannt", "ergebnis": "unbekannt"}
 
         logger.info("Speichere Session Report...")
-        save_session_report(
-            session_transcript,
-            crm_data=crm_data_saved or None,
-            latency_data=latency_measurements,
-            call_duration=call_duration,
-            call_start_time=call_start_str,
-            analysis=analysis,
-            timestamp=session_timestamp
-        )
+        try:
+            save_session_report(
+                session_transcript,
+                crm_data=crm_data_saved or None,
+                latency_data=latency_measurements,
+                call_duration=call_duration,
+                call_start_time=call_start_str,
+                analysis=analysis,
+                timestamp=session_timestamp
+            )
+        except Exception as e:
+            logger.error("Session Report konnte nicht gespeichert werden: %s", e)
+
+        try:
+            email_service.send_call_result_summary(
+                call_start_time=call_start_str,
+                call_duration_seconds=call_duration,
+                crm_data=crm_data_saved or None,
+                analysis=analysis,
+                transcript=session_transcript,
+            )
+        except Exception as e:
+            logger.warning("Ergebnis-Mail Versand fehlgeschlagen: %s", e)
 
 
 if __name__ == "__main__":

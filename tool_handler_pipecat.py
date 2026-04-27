@@ -17,15 +17,12 @@ partner_farewell_detected = False
 assistant_farewell_detected = False
 
 _ALLOWED_STATUSES = {"scheduled", "declined", "callback"}
-_ALLOWED_CONTACT_METHODS = {"phone", "video"}
+_ALLOWED_CONTACT_METHODS = {"phone"}
 _CONTACT_METHOD_ALIASES = {
     "telefon": "phone",
     "telefonisch": "phone",
     "anruf": "phone",
     "phone": "phone",
-    "video": "video",
-    "videocall": "video",
-    "video call": "video",
 }
 
 _FAREWELL_PATTERNS = (
@@ -44,6 +41,25 @@ _FAREWELL_PATTERNS = (
 )
 
 
+def _is_strict_farewell(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+
+    # Keine Verabschiedung während Terminfindung/Rückfrage interpretieren
+    if "?" in normalized:
+        return False
+
+    tokens = re.findall(r"\w+", normalized)
+    if len(tokens) > 10:
+        return False
+
+    for pattern in _FAREWELL_PATTERNS:
+        if re.search(pattern, normalized):
+            return True
+    return False
+
+
 def reset_call_state() -> None:
     global appointment_done, partner_farewell_detected, assistant_farewell_detected
     appointment_done = False
@@ -58,12 +74,10 @@ def mark_partner_farewell(text: str) -> bool:
     if partner_farewell_detected:
         return True
 
-    normalized = (text or "").lower()
-    for pattern in _FAREWELL_PATTERNS:
-        if re.search(pattern, normalized):
-            partner_farewell_detected = True
-            logger.info("Partner-Verabschiedung erkannt.")
-            return True
+    if _is_strict_farewell(text):
+        partner_farewell_detected = True
+        logger.info("Partner-Verabschiedung erkannt.")
+        return True
     return False
 
 
@@ -73,12 +87,10 @@ def mark_assistant_farewell(text: str) -> bool:
     if assistant_farewell_detected:
         return True
 
-    normalized = (text or "").lower()
-    for pattern in _FAREWELL_PATTERNS:
-        if re.search(pattern, normalized):
-            assistant_farewell_detected = True
-            logger.info("Agent-Verabschiedung erkannt.")
-            return True
+    if _is_strict_farewell(text):
+        assistant_farewell_detected = True
+        logger.info("Agent-Verabschiedung erkannt.")
+        return True
     return False
 
 
@@ -131,7 +143,7 @@ async def handle_schedule_appointment(params: FunctionCallParams):
         if not str(payload.get("appointment_date", "")).strip():
             missing_fields.append("appointment_date")
         if not normalized_contact_method:
-            missing_fields.append("contact_method")
+            normalized_contact_method = "phone"
         elif normalized_contact_method not in _ALLOWED_CONTACT_METHODS:
             missing_fields.append("contact_method")
 
@@ -139,7 +151,7 @@ async def handle_schedule_appointment(params: FunctionCallParams):
             await params.result_callback({
                 "status": "needs_more_info",
                 "missing_fields": missing_fields,
-                "message": "Bitte frage noch kurz nach fehlenden Angaben: konkreter Termin sowie Erreichbarkeit per Telefon oder Video.",
+                "message": "Bitte frage noch kurz nach fehlenden Angaben: konkrete Terminzeit.",
             })
             return
 

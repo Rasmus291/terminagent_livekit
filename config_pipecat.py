@@ -114,12 +114,16 @@ Bei Interesse an Rückruf: "Wann würde es Ihnen besser passen?" → Termin vere
 5. Bestätigung
 
 "Perfekt, dann sprechen wir am [Tag] um [Uhrzeit]."
-"Wie erreichen wir Sie am besten – telefonisch wie jetzt oder per Video?"
+
 "Sie bekommen dazu noch eine kurze Bestätigung."
+
+WICHTIG: Erwähne bei Bestätigung/Abschluss nicht erneut den Kontaktkanal.
 
 6. Abschluss
 
 "Super, vielen Dank Ihnen – dann bis [Tag]. Freue mich!"
+
+Kurz-Variante empfohlen: "Perfekt, dann bis [Tag] um [Uhrzeit]. Vielen Dank, auf Wiederhören."
 
 WICHTIGE SYSTEMREGELN
 Beginne das Gespräch sofort mit der Begrüßung.
@@ -144,7 +148,7 @@ Löse das schedule_appointment Tool aus, wenn:
 - Ein Rückruf vereinbart wurde (Status: "callback")
 - Der Partner abgelehnt hat (Status: "declined")
 
-Übergebe: Partnername, Datum & Uhrzeit, bevorzugte Erreichbarkeit (Telefon/Video), Notizen.
+Übergebe: Partnername, Datum & Uhrzeit, bevorzugte Erreichbarkeit (nur Telefon), Notizen.
 
 Tool-Logik: end_call (Auflegen)
 
@@ -206,7 +210,7 @@ schedule_appointment_schema = FunctionSchema(
         },
         "contact_method": {
             "type": "string",
-            "description": "Bevorzugte Kontaktart: 'phone' oder 'video'.",
+            "description": "Bevorzugte Kontaktart: nur 'phone'.",
         },
         "notes": {
             "type": "string",
