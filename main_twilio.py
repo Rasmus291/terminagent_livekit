@@ -58,6 +58,7 @@ from pipecat.transports.websocket.fastapi import (
 
 from config_pipecat import GEMINI_API_KEY, LLM_SETTINGS, TOOLS
 from contacts_excel import find_contact, get_contacts_excel_path, load_contacts, normalize_phone
+import email_service
 from tool_handler_pipecat import (
     handle_check_availability,
     handle_schedule_appointment,
@@ -65,6 +66,7 @@ from tool_handler_pipecat import (
     call_ended,
     crm_data_saved,
     mark_partner_farewell,
+    mark_assistant_farewell,
     reset_call_state,
 )
 from reporting_pipecat import save_session_report, generate_analysis, build_learning_brief
@@ -323,6 +325,7 @@ async def twilio_websocket(websocket: WebSocket):
         if message.content:
             logger.info(f"Agent: {message.content}")
             session_transcript.append(f"**[{ts}] Agent:** {message.content}")
+            mark_assistant_farewell(message.content)
 
     # --- Pipeline ---
     pipeline = Pipeline(
@@ -408,6 +411,18 @@ async def twilio_websocket(websocket: WebSocket):
             analysis=analysis,
             timestamp=session_timestamp,
         )
+
+        try:
+            email_service.send_call_result_summary(
+                call_start_time=call_start_str,
+                call_duration_seconds=call_duration,
+                crm_data=crm_data_saved or None,
+                analysis=analysis,
+                transcript=session_transcript,
+            )
+        except Exception as e:
+            logger.warning("Ergebnis-Mail Versand fehlgeschlagen: %s", e)
+
         logger.info(f"Call beendet. Dauer: {call_duration:.0f}s, Caller: {caller_id}")
 
 

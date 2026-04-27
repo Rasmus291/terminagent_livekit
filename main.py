@@ -18,29 +18,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 _FAREWELL_PATTERNS = (
-    "tschüss",
-    "auf wiedersehen",
-    "auf wiederhören",
-    "wiedersehen",
-    "bis zum termin",
-    "bis dann",
-    "bis bald",
-    "bis später",
-    "schönen tag",
-    "schönen tag noch",
-    "einen schönen tag",
-    "alles gute",
-    "machs gut",
-    "mach's gut",
-    "ciao",
-    "servus",
+    r"\btsch(u|ü)ss\b",
+    r"\bauf wiedersehen\b",
+    r"\bauf wiederh(ö|oe)ren\b",
+    r"\bbis zum termin\b",
+    r"\bbis dann\b",
+    r"\bbis bald\b",
+    r"\bbis sp(ä|ae)ter\b",
+    r"\bsch(ö|oe)nen tag\b",
+    r"\bsch(ö|oe)nen tag noch\b",
+    r"\beinen sch(ö|oe)nen tag\b",
+    r"\balles gute\b",
+    r"\bmach'?s gut\b",
+    r"\bciao\b",
 )
 
 def _is_farewell_text(text: str) -> bool:
     if not text:
         return False
     normalized = text.lower()
-    return any(pattern in normalized for pattern in _FAREWELL_PATTERNS)
+    return any(re.search(pattern, normalized) for pattern in _FAREWELL_PATTERNS)
 
 
 def _extract_role_text(entry: str, role: str):
@@ -53,23 +50,21 @@ def _extract_role_text(entry: str, role: str):
     return text.strip()
 
 
+def _latest_role_text(transcript: list[str], role: str) -> str | None:
+    for entry in reversed(transcript):
+        text = _extract_role_text(entry, role)
+        if text:
+            return text
+    return None
+
+
 def _mutual_farewell_detected(transcript: list[str]) -> bool:
-    user_farewell = False
-    agent_farewell = False
-
-    for entry in reversed(transcript[-12:]):
-        user_text = _extract_role_text(entry, "User")
-        if user_text and _is_farewell_text(user_text):
-            user_farewell = True
-
-        agent_text = _extract_role_text(entry, "Agent")
-        if agent_text and _is_farewell_text(agent_text):
-            agent_farewell = True
-
-        if user_farewell and agent_farewell:
-            return True
-
-    return False
+    """Beendet nur, wenn die jeweils LETZTE User- und Agent-Aussage klar Verabschiedungen sind."""
+    last_user = _latest_role_text(transcript, "User")
+    last_agent = _latest_role_text(transcript, "Agent")
+    if not last_user or not last_agent:
+        return False
+    return _is_farewell_text(last_user) and _is_farewell_text(last_agent)
 
 
 async def main():
@@ -119,10 +114,6 @@ async def main():
             async def receive_responses():
                 appointment_done = False
                 while True:
-                    if _mutual_farewell_detected(session_transcript):
-                        logger.info("Beidseitige Verabschiedung erkannt. Beende Gespräch sofort.")
-                        raise asyncio.CancelledError("Mutual farewell detected")
-
                     if appointment_done:
                         # Nach Terminvereinbarung: Noch kurz auf Rückfragen warten
                         try:
@@ -134,6 +125,11 @@ async def main():
                         tool_triggered = await handler.process_turn(session)
                         if tool_triggered:
                             appointment_done = True
+
+                    # Nur zwischen vollständigen Turns prüfen, nie mitten im Satz
+                    if _mutual_farewell_detected(session_transcript):
+                        logger.info("Beidseitige Verabschiedung erkannt. Beende Gespräch nach Turn-Abschluss.")
+                        raise asyncio.CancelledError("Mutual farewell detected")
 
             await asyncio.gather(send_audio(), receive_responses(), trigger_greeting())
 

@@ -37,7 +37,6 @@ _FAREWELL_PATTERNS = (
     r"\balles gute\b",
     r"\bmach'?s gut\b",
     r"\bciao\b",
-    r"\bservus\b",
     r"\bwiedersehen\b",
     r"\bade\b",
     r"\badiö\b",
