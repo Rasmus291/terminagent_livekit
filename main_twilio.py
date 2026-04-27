@@ -27,7 +27,7 @@ import logging
 import time
 import wave
 from copy import deepcopy
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 
 import uvicorn
 from dotenv import load_dotenv
@@ -83,6 +83,11 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 # Server Config
 HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 PORT = int(os.getenv("SERVER_PORT", "8765"))
+MAILBOX_MESSAGE = os.getenv(
+    "TWILIO_MAILBOX_MESSAGE",
+    "Hallo, hier ist Anna von LaVita. Ich rufe an wegen eines kurzen Termins zur Abstimmung der Zusammenarbeit. "
+    "Bitte rufen Sie uns kurz zurück. Vielen Dank und auf Wiederhören.",
+)
 
 app = FastAPI()
 
@@ -94,6 +99,26 @@ async def twilio_incoming(request: Request):
     Twilio ruft diese URL auf wenn ein Anruf verbunden wird.
     Antwort: TwiML das Twilio anweist, einen Media Stream WebSocket zu öffnen.
     """
+    body_bytes = await request.body()
+    form_data = parse_qs(body_bytes.decode("utf-8", errors="ignore")) if body_bytes else {}
+    answered_by = str((form_data.get("AnsweredBy") or [""])[0]).strip().lower()
+
+    # Twilio AMD: bei Mailbox/Fax eine kurze Ansage sprechen und auflegen
+    machine_answer = (
+        answered_by.startswith("machine")
+        or answered_by == "fax"
+        or answered_by == "unknown"
+    )
+    if machine_answer:
+        logger.info("Mailbox/Fax erkannt (AnsweredBy=%s). Starte Mailbox-Ansage.", answered_by or "-")
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Pause length="1"/>
+    <Say voice="alice" language="de-DE">{MAILBOX_MESSAGE}</Say>
+    <Hangup/>
+</Response>"""
+        return PlainTextResponse(content=twiml, media_type="text/xml")
+
     # Bestimme die WebSocket-URL basierend auf dem Host-Header
     host = request.headers.get("host", f"{HOST}:{PORT}")
     # Verwende wss:// wenn hinter einem Proxy (ngrok, etc.)
@@ -455,7 +480,7 @@ async def initiate_call(request: Request):
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
         url=webhook_url,
-        machine_detection="Enable",
+        machine_detection="DetectMessageEnd",
         machine_detection_timeout=5,
     )
 
