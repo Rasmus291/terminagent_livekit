@@ -29,10 +29,20 @@ _FAREWELL_PATTERNS = (
     r"\bauf wiedersehen\b",
     r"\bbis dann\b",
     r"\bbis bald\b",
+    r"\bbis sp(ä|ae)ter\b",
     r"\bbis zum termin\b",
     r"\bvielen dank\b",
     r"\bsch(ö|oe)nen tag noch\b",
+    r"\beinen sch(ö|oe)nen tag\b",
+    r"\balles gute\b",
+    r"\bmach'?s gut\b",
     r"\bciao\b",
+    r"\bservus\b",
+    r"\bwiedersehen\b",
+    r"\bade\b",
+    r"\badiö\b",
+    r"\bpfiat di\b",
+    r"\bahoi\b",
 )
 
 

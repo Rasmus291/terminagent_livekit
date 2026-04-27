@@ -17,11 +17,18 @@ partner_farewell_detected = False
 
 _FAREWELL_PATTERNS = (
     r"\btsch(u|ü)ss\b",
+    r"\bauf wiedersehen\b",
     r"\bauf wiederh(ö|oe)ren\b",
     r"\bbis dann\b",
     r"\bbis bald\b",
+    r"\bbis sp(ä|ae)ter\b",
+    r"\bbis zum termin\b",
     r"\bsch(ö|oe)nen tag noch\b",
+    r"\beinen sch(ö|oe)nen tag\b",
+    r"\balles gute\b",
+    r"\bmach'?s gut\b",
     r"\bciao\b",
+    r"\bservus\b",
 )
 
 

@@ -55,7 +55,11 @@ async def process_tool_calls(response, session, crm_data_saved, audio_streamer):
         logger.info(f"Argumente: {fc.args}")
         
         if fc.name == "schedule_appointment":
-            await handle_schedule_appointment(fc, session, crm_data_saved, audio_streamer)
-            return True  # Signal: Termin wurde verarbeitet, Gespräch kann bald enden
+            payload = await handle_schedule_appointment(fc, session, crm_data_saved, audio_streamer)
+            status = str(payload.get("status", "")).strip().lower()
+            if status == "scheduled":
+                return True  # Nur bei bestätigtem Termin den "bald beenden"-Pfad aktivieren
+            logger.info("Status=%s -> Gespräch bleibt aktiv für höflichen Abschluss.", status or "unbekannt")
+            return False
     
     return False
