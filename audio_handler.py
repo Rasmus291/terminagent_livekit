@@ -13,9 +13,10 @@ class AudioStreamer:
     Utilizes a dedicated playback thread to prevent blocking the asyncio event loop.
     """
     
-    def __init__(self, input_rate=16000, output_rate=24000, channels=1, chunk_size=512):
+    def __init__(self, input_rate=16000, output_rate=24000, channels=1, chunk_size=512, playback_rate=48000):
         self.input_rate = input_rate
         self.output_rate = output_rate
+        self.playback_rate = playback_rate
         self.channels = channels
         self.chunk_size = chunk_size
         
@@ -26,7 +27,7 @@ class AudioStreamer:
         self.output_queue = queue.Queue()
         self.is_running = False
         self.playback_thread = None
-        self._prebuffer_count = 1        # Chunks zu sammeln bevor Wiedergabe startet
+        self._prebuffer_count = 3        # Chunks zu sammeln bevor Wiedergabe startet
         self._turn_started = False       # Flag: Pre-Buffer abgeschlossen?
         
         # Audio-Aufzeichnung: Input fortlaufend, Output mit Zeitstempel für Synchronisation
@@ -62,13 +63,28 @@ class AudioStreamer:
             callback=input_callback
         )
         
-        self.out_stream = sd.RawOutputStream(
-            samplerate=self.output_rate,
-            channels=self.channels,
-            dtype='int16',
-            blocksize=1024,
-            latency=0.05    # 50ms Buffer — verhindert Stotterer am Turn-Anfang
-        )
+        # Viele Consumer-Devices klingen bei 24kHz verzerrt. Primär 48kHz verwenden,
+        # auf 24kHz fallbacken falls das Gerät 48kHz nicht unterstützt.
+        selected_playback_rate = None
+        playback_error = None
+        for candidate_rate in (self.playback_rate, self.output_rate):
+            try:
+                self.out_stream = sd.RawOutputStream(
+                    samplerate=candidate_rate,
+                    channels=self.channels,
+                    dtype='int16',
+                    blocksize=1024,
+                    latency=0.05    # 50ms Buffer — verhindert Stotterer am Turn-Anfang
+                )
+                selected_playback_rate = candidate_rate
+                break
+            except Exception as e:
+                playback_error = e
+
+        if self.out_stream is None:
+            raise RuntimeError(f"Output-Stream konnte nicht gestartet werden: {playback_error}")
+
+        self.playback_rate = selected_playback_rate
 
         self.in_stream.start()
         self.out_stream.start()
@@ -88,10 +104,14 @@ class AudioStreamer:
                 chunk = self.output_queue.get(timeout=0.1)
                 if not self.is_running or not self.out_stream:
                     continue
+
+                playback_chunk = chunk
+                if self.playback_rate != self.output_rate:
+                    playback_chunk = self._resample(chunk, self.output_rate, self.playback_rate)
                 
                 if not self._turn_started:
                     # Erste Chunks des Turns sammeln bevor Wiedergabe startet
-                    prebuffer.append(chunk)
+                    prebuffer.append(playback_chunk)
                     if len(prebuffer) >= self._prebuffer_count:
                         for buf_chunk in prebuffer:
                             try:
@@ -102,7 +122,7 @@ class AudioStreamer:
                         self._turn_started = True
                 else:
                     try:
-                        self.out_stream.write(chunk)
+                        self.out_stream.write(playback_chunk)
                     except Exception:
                         pass
             except queue.Empty:
@@ -222,8 +242,6 @@ class AudioStreamer:
             wf.setsampwidth(2)
             wf.setframerate(self.input_rate)
             wf.writeframes(bytes(stereo))
-        
-        return {"recording": path}
         
         return {"recording": path}
 

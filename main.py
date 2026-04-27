@@ -3,6 +3,7 @@ import asyncio
 import logging
 import datetime
 import time
+import re
 
 from google import genai
 from google.genai import types
@@ -15,6 +16,51 @@ from response_handler import ResponseHandler
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+_FAREWELL_PATTERNS = (
+    "tschüss",
+    "auf wiedersehen",
+    "auf wiederhören",
+    "wiedersehen",
+    "bis zum termin",
+    "bis dann",
+)
+
+
+def _is_farewell_text(text: str) -> bool:
+    if not text:
+        return False
+    normalized = text.lower()
+    return any(pattern in normalized for pattern in _FAREWELL_PATTERNS)
+
+
+def _extract_role_text(entry: str, role: str):
+    match = re.match(r"^\*\*\[[^\]]+\]\s+(User|Agent):\*\*\s*(.+)$", entry.strip())
+    if not match:
+        return None
+    found_role, text = match.group(1), match.group(2)
+    if found_role != role:
+        return None
+    return text.strip()
+
+
+def _mutual_farewell_detected(transcript: list[str]) -> bool:
+    user_farewell = False
+    agent_farewell = False
+
+    for entry in reversed(transcript[-12:]):
+        user_text = _extract_role_text(entry, "User")
+        if user_text and _is_farewell_text(user_text):
+            user_farewell = True
+
+        agent_text = _extract_role_text(entry, "Agent")
+        if agent_text and _is_farewell_text(agent_text):
+            agent_farewell = True
+
+        if user_farewell and agent_farewell:
+            return True
+
+    return False
 
 
 async def main():
@@ -64,6 +110,10 @@ async def main():
             async def receive_responses():
                 appointment_done = False
                 while True:
+                    if _mutual_farewell_detected(session_transcript):
+                        logger.info("Beidseitige Verabschiedung erkannt. Beende Gespräch sofort.")
+                        raise asyncio.CancelledError("Mutual farewell detected")
+
                     if appointment_done:
                         # Nach Terminvereinbarung: Noch kurz auf Rückfragen warten
                         try:
