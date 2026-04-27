@@ -262,8 +262,8 @@ async def twilio_websocket(websocket: WebSocket):
             },
         ],
     )
-    user_turn_stop_speech_timeout = float(os.getenv("USER_TURN_SPEECH_TIMEOUT", "0.25"))
-    user_turn_stop_timeout = float(os.getenv("USER_TURN_STOP_TIMEOUT", "0.9"))
+    user_turn_stop_speech_timeout = float(os.getenv("USER_TURN_SPEECH_TIMEOUT", "0.12"))
+    user_turn_stop_timeout = float(os.getenv("USER_TURN_STOP_TIMEOUT", "0.35"))
     user_turn_strategies = UserTurnStrategies(
         start=[VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()],
         stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=user_turn_stop_speech_timeout)],
@@ -374,9 +374,12 @@ async def twilio_websocket(websocket: WebSocket):
         user_path = f"sessions/recording_user_{session_timestamp}.wav"
         agent_path = f"sessions/recording_agent_{session_timestamp}.wav"
 
-        write_wav(mono_path, recording_mono_audio, recording_sample_rate, num_channels=1)
-        write_wav(user_path, recording_user_audio, recording_sample_rate, num_channels=1)
-        write_wav(agent_path, recording_agent_audio, recording_sample_rate, num_channels=1)
+        try:
+            write_wav(mono_path, recording_mono_audio, recording_sample_rate, num_channels=1)
+            write_wav(user_path, recording_user_audio, recording_sample_rate, num_channels=1)
+            write_wav(agent_path, recording_agent_audio, recording_sample_rate, num_channels=1)
+        except Exception as e:
+            logger.warning("Audio-Dateien konnten nicht gespeichert werden: %s", e)
 
         if recording_mono_audio:
             logger.info("Mono-Aufnahme gespeichert: %s", mono_path)
@@ -403,14 +406,17 @@ async def twilio_websocket(websocket: WebSocket):
             }
 
         logger.info("Speichere Session Report...")
-        save_session_report(
-            session_transcript,
-            crm_data=crm_data_saved or None,
-            call_duration=call_duration,
-            call_start_time=call_start_str,
-            analysis=analysis,
-            timestamp=session_timestamp,
-        )
+        try:
+            save_session_report(
+                session_transcript,
+                crm_data=crm_data_saved or None,
+                call_duration=call_duration,
+                call_start_time=call_start_str,
+                analysis=analysis,
+                timestamp=session_timestamp,
+            )
+        except Exception as e:
+            logger.error("Session Report konnte nicht gespeichert werden: %s", e)
 
         try:
             email_service.send_call_result_summary(
