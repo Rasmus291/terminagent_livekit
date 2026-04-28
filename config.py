@@ -6,7 +6,7 @@ load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_ID = os.getenv("MODEL_ID", "gemini-2.5-flash-native-audio-preview-12-2025")
-VOICE_NAME = os.getenv("VOICE_NAME", "Aoede")
+VOICE_NAME = os.getenv("VOICE_NAME", "Kore")
 ENABLE_FUNCTION_TOOLS = os.getenv("ENABLE_FUNCTION_TOOLS", "0").strip().lower() in {"1", "true", "yes"}
 
 INPUT_SAMPLE_RATE = 16000     
