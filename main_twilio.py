@@ -28,6 +28,7 @@ import time
 import wave
 import glob
 import re
+import base64
 from copy import deepcopy
 from urllib.parse import urlencode, parse_qs
 
@@ -100,6 +101,31 @@ PUBLIC_URL = None
 
 app = FastAPI()
 
+_live_monitor_clients: set[WebSocket] = set()
+_live_monitor_call_info = {
+    "active": False,
+    "call_sid": "",
+    "contact_name": "",
+    "caller_id": "",
+}
+
+
+async def _broadcast_live_monitor(payload: dict):
+    disconnected_clients = []
+    for client in list(_live_monitor_clients):
+        try:
+            await client.send_json(payload)
+        except Exception:
+            disconnected_clients.append(client)
+
+    for client in disconnected_clients:
+        _live_monitor_clients.discard(client)
+
+
+def _push_live_monitor(payload: dict):
+    if _live_monitor_clients:
+        asyncio.create_task(_broadcast_live_monitor(payload))
+
 # Frontend UI
 _frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.isdir(_frontend_dir):
@@ -108,6 +134,30 @@ if os.path.isdir(_frontend_dir):
 _sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
 if os.path.isdir(_sessions_dir):
     app.mount("/media/sessions", StaticFiles(directory=_sessions_dir), name="sessions-media")
+
+
+@app.websocket("/monitor/ws")
+async def monitor_websocket(websocket: WebSocket):
+    await websocket.accept()
+    _live_monitor_clients.add(websocket)
+
+    await websocket.send_json(
+        {
+            "type": "state",
+            "active": _live_monitor_call_info["active"],
+            "call_sid": _live_monitor_call_info["call_sid"],
+            "contact_name": _live_monitor_call_info["contact_name"],
+            "caller_id": _live_monitor_call_info["caller_id"],
+        }
+    )
+
+    try:
+        while True:
+            await websocket.receive()
+    except Exception:
+        pass
+    finally:
+        _live_monitor_clients.discard(websocket)
 
 
 def _extract_section(markdown_text: str, title: str) -> str:
@@ -265,6 +315,23 @@ async def twilio_websocket(websocket: WebSocket):
         f"Twilio Stream gestartet: stream_sid={stream_sid}, call_sid={call_sid}, caller={caller_id}, contact={contact_name or '-'}, contact_id={contact_id or '-'}"
     )
 
+    _live_monitor_call_info.update(
+        {
+            "active": True,
+            "call_sid": call_sid,
+            "contact_name": contact_name,
+            "caller_id": caller_id,
+        }
+    )
+    _push_live_monitor(
+        {
+            "type": "call-start",
+            "call_sid": call_sid,
+            "contact_name": contact_name,
+            "caller_id": caller_id,
+        }
+    )
+
     # Session-Tracking
     session_transcript = []
     session_start_time = datetime.datetime.now()
@@ -364,7 +431,12 @@ async def twilio_websocket(websocket: WebSocket):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context, user_params=user_params)
 
     # --- Audio Recording ---
-    audiobuffer = AudioBufferProcessor(sample_rate=16000, num_channels=1)
+    live_monitor_buffer_size = int(os.getenv("LIVE_MONITOR_BUFFER_SIZE", "3200"))
+    audiobuffer = AudioBufferProcessor(
+        sample_rate=16000,
+        num_channels=1,
+        buffer_size=live_monitor_buffer_size,
+    )
     recording_user_audio = bytearray()
     recording_agent_audio = bytearray()
     recording_mono_audio = bytearray()
@@ -386,8 +458,26 @@ async def twilio_websocket(websocket: WebSocket):
         recording_sample_rate = sample_rate or recording_sample_rate
         if len(user_audio) > 0:
             recording_user_audio.extend(user_audio)
+            _push_live_monitor(
+                {
+                    "type": "audio",
+                    "track": "partner",
+                    "sample_rate": sample_rate or recording_sample_rate,
+                    "call_sid": call_sid,
+                    "pcm16": base64.b64encode(user_audio).decode("ascii"),
+                }
+            )
         if len(bot_audio) > 0:
             recording_agent_audio.extend(bot_audio)
+            _push_live_monitor(
+                {
+                    "type": "audio",
+                    "track": "agent",
+                    "sample_rate": sample_rate or recording_sample_rate,
+                    "call_sid": call_sid,
+                    "pcm16": base64.b64encode(bot_audio).decode("ascii"),
+                }
+            )
 
     @audiobuffer.event_handler("on_audio_data")
     async def on_audio_data(buffer, audio, sample_rate, num_channels):
@@ -454,6 +544,16 @@ async def twilio_websocket(websocket: WebSocket):
     try:
         await runner.run(task)
     finally:
+        _live_monitor_call_info.update(
+            {
+                "active": False,
+                "call_sid": "",
+                "contact_name": "",
+                "caller_id": "",
+            }
+        )
+        _push_live_monitor({"type": "call-end", "call_sid": call_sid})
+
         try:
             await audiobuffer.stop_recording()
         except Exception as e:
