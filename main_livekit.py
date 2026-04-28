@@ -16,6 +16,7 @@ from livekit.plugins import google, silero
 from config import GEMINI_API_KEY, MODEL_ID, SYSTEM_INSTRUCTION
 from reporting_livekit import build_learning_brief, generate_analysis, save_session_report
 from tool_handler_livekit import (
+    assistant_farewell_detected,
     call_ended,
     check_availability,
     crm_data_saved,
@@ -255,6 +256,14 @@ async def lavita_agent(ctx: JobContext):
             logger.info("Agent: %s", text)
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
+            # Farewell-Timer: wenn Agent sich verabschiedet hat, nach 5s automatisch auflegen
+            if assistant_farewell_detected and not call_ended.is_set():
+                async def _farewell_timer():
+                    await asyncio.sleep(5)
+                    if not call_ended.is_set():
+                        logger.info("⏰ Farewell-Timer abgelaufen — erzwinge Auflegen.")
+                        call_ended.set()
+                asyncio.create_task(_farewell_timer())
 
     session.on("conversation_item_added", on_conversation_item)
 
@@ -376,13 +385,29 @@ async def lavita_agent(ctx: JobContext):
             except Exception as e:
                 logger.error("finalize_session fehlgeschlagen: %s", e, exc_info=True)
 
-            # SIP-Call aktiv auflegen: Room disconnecten bevor Session shutdown
-            logger.info("Trenne Room-Verbindung (legt SIP-Call auf)...")
+            # SIP-Call aktiv auflegen: SIP-Participant aus dem Room kicken
+            logger.info("Lege SIP-Call auf...")
             try:
-                await ctx.room.disconnect()
-                logger.info("Room getrennt — SIP-Call aufgelegt.")
+                from livekit.api import LiveKitAPI, RoomParticipantIdentity
+                lk_url = os.getenv("LIVEKIT_URL", "")
+                lk_key = os.getenv("LIVEKIT_API_KEY", "")
+                lk_secret = os.getenv("LIVEKIT_API_SECRET", "")
+                room_name = ctx.room.name
+
+                # Alle Remote-Participants (= SIP-Telefonteilnehmer) entfernen
+                async with LiveKitAPI(lk_url, lk_key, lk_secret) as lk:
+                    for identity, participant in ctx.room.remote_participants.items():
+                        logger.info("Entferne Participant %s aus Room %s...", identity, room_name)
+                        await lk.room.remove_participant(
+                            RoomParticipantIdentity(room=room_name, identity=identity)
+                        )
+                        logger.info("Participant %s entfernt — SIP-Call aufgelegt.", identity)
             except Exception as e:
-                logger.warning("Room-Disconnect fehlgeschlagen: %s", e)
+                logger.warning("SIP-Auflegen fehlgeschlagen: %s — versuche Room-Disconnect.", e)
+                try:
+                    await ctx.room.disconnect()
+                except Exception:
+                    pass
 
             logger.info("Fahre Session herunter (drain=False)...")
             session.shutdown(drain=False)
