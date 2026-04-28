@@ -527,8 +527,9 @@ async def initiate_call(request: Request):
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
         twiml=twiml,
-        machine_detection="DetectMessageEnd",
-        machine_detection_timeout=5,
+        machine_detection="Enable",
+        machine_detection_timeout=3,
+        async_amd=True,
     )
 
     logger.info(
