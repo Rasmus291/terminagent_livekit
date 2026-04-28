@@ -183,23 +183,17 @@ async def handle_schedule_appointment(params: FunctionCallParams):
         except Exception as e:
             logger.warning(f"  Calendly Buchungslink konnte nicht erstellt werden: {e}")
 
-    # E-Mail-Benachrichtigung an Mitarbeiter senden (als Terminvorschlag)
-    email_sent = email_service.send_appointment_proposal(
-        partner_name=payload.get("partner_name", "Unbekannt"),
-        appointment_date=payload.get("appointment_date", ""),
-        contact_method=payload.get("contact_method", ""),
-        notes=payload.get("notes", ""),
-        status=payload.get("status", "scheduled"),
-        calendly_link=booking_url,
-    )
+    if booking_url:
+        crm_data_saved["calendly_link"] = booking_url
+
+    # E-Mail wird nach Gesprächsende in finalize_session gesendet,
+    # damit die Gesprächsanalyse in der Mail enthalten ist.
 
     appointment_done = True
 
     result = {"status": "recorded"}
     if booking_url:
         result["calendly_booking_url"] = booking_url
-    if email_sent:
-        result["email_notification"] = "sent"
     await params.result_callback(result)
 
 

@@ -286,7 +286,7 @@ def send_call_result_summary(
     analysis: dict | None,
     transcript: list[str] | None,
 ) -> bool:
-    """Sendet eine Ergebnis-Mail mit Gesprächsausgang und Kurz-Analyse."""
+    """Sendet eine Ergebnis-Mail mit Gesprächsausgang, Analyse und Calendly-Link."""
     if not is_configured():
         logger.warning("Ergebnis-Mail übersprungen: SMTP nicht konfiguriert.")
         return False
@@ -303,26 +303,64 @@ def send_call_result_summary(
     partner_name = (crm_data.get("partner_name") or "Unbekannt").strip()
     status = (crm_data.get("status") or analysis.get("ergebnis") or "unbekannt").strip()
     appointment_date = (crm_data.get("appointment_date") or "-").strip() or "-"
-    contact_method = (crm_data.get("contact_method") or "-").strip() or "-"
     notes = (crm_data.get("notes") or "-").strip() or "-"
-    sentiment = str(analysis.get("sentiment_gesamt") or "unbekannt")
+    calendly_link = crm_data.get("calendly_link")
+    sentiment_gesamt = str(analysis.get("sentiment_gesamt") or "unbekannt")
+    sentiment_partner = analysis.get("sentiment_partner")
+    stimmung_details = str(analysis.get("stimmung_details") or "")
     summary = str(analysis.get("zusammenfassung") or "Keine automatische Zusammenfassung verfügbar.")
+
+    sentiment_display = sentiment_gesamt.capitalize()
+    if sentiment_partner is not None:
+        sentiment_display += f" ({sentiment_partner}/10)"
 
     subject = f"Gesprächsergebnis: {partner_name} ({status})"
     duration_display = f"{int(round(call_duration_seconds))}s"
 
+    # Kalender-Links aufbauen (nur bei vereinbartem Termin mit Datum)
+    google_cal_link = None
+    outlook_cal_link = None
+    has_appointment = appointment_date and appointment_date != "-" and status == "scheduled"
+    if has_appointment:
+        google_cal_link = _build_google_calendar_link(partner_name, appointment_date, "", notes)
+        outlook_cal_link = _build_outlook_calendar_link(partner_name, appointment_date, "", notes)
+
+    # Kalender-Buttons HTML
+    calendar_buttons_html = ""
+    if google_cal_link or outlook_cal_link or (calendly_link and has_appointment):
+        button_style = "display: inline-block; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 5px 5px 5px 0; font-size: 14px;"
+        calendar_buttons_html = '<div style="margin: 20px 0;">'
+        calendar_buttons_html += '<p style="font-weight: bold; margin-bottom: 10px;">Termin direkt eintragen:</p>'
+        if calendly_link and has_appointment:
+            calendar_buttons_html += f'<a href="{calendly_link}" style="{button_style} background-color: #2c5530;">📅 Calendly – Termin bestätigen</a> '
+        if google_cal_link:
+            calendar_buttons_html += f'<a href="{google_cal_link}" style="{button_style} background-color: #4285F4;">📅 Google Calendar</a> '
+        if outlook_cal_link:
+            calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Outlook</a> '
+        calendar_buttons_html += '</div>'
+
+    # Zusammenfassung HTML
+    zusammenfassung_html = f"""
+    <div style="background-color: #f8f9fa; border-left: 4px solid #2c5530; padding: 12px 16px; margin: 20px 0;">
+        <p style="font-weight: bold; margin: 0 0 6px 0;">Gesprächszusammenfassung</p>
+        <p style="margin: 0;">{summary}</p>
+    </div>
+    """
+
     text = (
-        "Gesprächsergebnis (LaVita Terminagent)\n\n"
+        f"Gesprächsergebnis \u2013 {partner_name}\n\n"
         f"Startzeit: {call_start_time}\n"
         f"Dauer: {duration_display}\n"
         f"Partner: {partner_name}\n"
         f"Status: {status}\n"
         f"Termin: {appointment_date}\n"
-        f"Kontaktart: {contact_method}\n"
         f"Notizen: {notes}\n"
-        f"Sentiment gesamt: {sentiment}\n"
+        f"Stimmung: {sentiment_display}\n"
+        f"{f'Stimmung Details: {stimmung_details}' if stimmung_details else ''}\n"
         f"Zusammenfassung: {summary}\n"
-        f"Transkriptzeilen: {len(transcript)}\n"
+        f"{f'Calendly: {calendly_link}' if calendly_link else ''}\n"
+        f"{f'Google Calendar: {google_cal_link}' if google_cal_link else ''}\n"
+        f"{f'Outlook: {outlook_cal_link}' if outlook_cal_link else ''}\n"
     )
 
     html = f"""
@@ -332,13 +370,17 @@ def send_call_result_summary(
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold; width: 180px;">Startzeit</td><td style="padding: 8px;">{call_start_time}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Dauer</td><td style="padding: 8px;">{duration_display}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Partner</td><td style="padding: 8px;">{partner_name}</td></tr>
-            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Status</td><td style="padding: 8px;">{status}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Status</td><td style="padding: 8px;">{'\u2705 Termin vereinbart' if status == 'scheduled' else '\ud83d\udd04 R\u00fcckruf' if status == 'callback' else '\u274c Abgelehnt' if status == 'declined' else status}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Termin</td><td style="padding: 8px;">{appointment_date}</td></tr>
-            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Kontaktart</td><td style="padding: 8px;">{contact_method}</td></tr>
-            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Sentiment</td><td style="padding: 8px;">{sentiment}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Stimmung</td><td style="padding: 8px;">{sentiment_display}</td></tr>
+            {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Stimmung Details</td><td style="padding: 8px;">' + stimmung_details + '</td></tr>' if stimmung_details else ''}
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Notizen</td><td style="padding: 8px;">{notes}</td></tr>
-            <tr><td style="padding: 8px; font-weight: bold; vertical-align: top;">Zusammenfassung</td><td style="padding: 8px;">{summary}</td></tr>
         </table>
+
+        {zusammenfassung_html}
+
+        {calendar_buttons_html}
+
         <p style="color: #777; font-size: 12px;">Transkriptzeilen: {len(transcript)}</p>
     </div>
     """
