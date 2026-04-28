@@ -211,7 +211,10 @@ def send_appointment_proposal(
                 <td style="padding: 10px; font-weight: bold;">Status</td>
                 <td style="padding: 10px;">{'✅ Termin vereinbart' if status == 'scheduled' else '🔄 Rückruf' if status == 'callback' else '❌ Abgelehnt'}</td>
             </tr>
-            {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Termin</td><td style="padding: 10px;">' + appointment_date + '</td></tr>' if appointment_date else ''}
+            <tr style="border-bottom: 1px solid #eee;">
+                <td style="padding: 10px; font-weight: bold;">Termin</td>
+                <td style="padding: 10px;">{appointment_date or 'Nicht festgelegt'}</td>
+            </tr>
             {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Notizen</td><td style="padding: 10px;">' + notes + '</td></tr>' if notes else ''}
             <tr style="border-bottom: 1px solid #eee;">
                 <td style="padding: 10px; font-weight: bold;">Stimmung</td>

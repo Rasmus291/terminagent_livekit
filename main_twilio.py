@@ -580,7 +580,7 @@ if __name__ == "__main__":
             ngrok_conf.get_default().ngrok_version = "v3"
             pyngrok_client.kill()
 
-            tunnel = pyngrok_client.connect(PORT, bind_tls=True)
+            tunnel = pyngrok_client.connect(PORT, "http", schemes=["https"])
             PUBLIC_URL = tunnel.public_url
             logger.info(f"ngrok Tunnel aktiv: {PUBLIC_URL}")
         except ImportError:
