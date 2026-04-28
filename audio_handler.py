@@ -6,6 +6,10 @@ import wave
 import struct
 import time
 import os
+import logging
+from array import array
+
+logger = logging.getLogger(__name__)
 
 class AudioStreamer:
     """Modular class for asynchronous PCM audio streaming (16-bit PCM).
@@ -17,6 +21,14 @@ class AudioStreamer:
         self.input_rate = input_rate
         self.output_rate = output_rate
         self.playback_rate = playback_rate
+        input_device_index = os.getenv("INPUT_DEVICE_INDEX", "").strip()
+        self.input_device_index = int(input_device_index) if input_device_index else None
+        input_channels_override = os.getenv("INPUT_CHANNELS", "").strip()
+        self.input_channels_override = int(input_channels_override) if input_channels_override else None
+        self.input_channels = channels
+        input_device_rate = os.getenv("INPUT_DEVICE_RATE", "").strip()
+        self.input_device_rate_override = int(input_device_rate) if input_device_rate else None
+        self.input_device_rate = self.input_rate
         self.channels = channels
         self.chunk_size = chunk_size
         
@@ -46,22 +58,75 @@ class AudioStreamer:
         """Initialisiert Audio-Streams und das Callback-System."""
         self.is_running = True
         self._recording_start_time = time.perf_counter()
+
+        try:
+            selected_input_idx = self.input_device_index
+            if selected_input_idx is None:
+                defaults = sd.default.device
+                if isinstance(defaults, (list, tuple)) and defaults:
+                    selected_input_idx = defaults[0]
+
+            input_info = sd.query_devices(selected_input_idx) if selected_input_idx is not None else None
+            max_input_channels = int(input_info.get("max_input_channels", 1) or 1) if input_info else 1
+            auto_channels = max(1, min(4, max_input_channels))
+            self.input_channels = self.input_channels_override or auto_channels
+            default_rate = int(input_info.get("default_samplerate", self.input_rate) or self.input_rate) if input_info else self.input_rate
+            self.input_device_rate = self.input_device_rate_override or default_rate
+        except Exception:
+            self.input_channels = self.input_channels_override or 1
+            self.input_device_rate = self.input_device_rate_override or self.input_rate
+
+        def _downmix_to_mono(raw_bytes: bytes, channel_count: int) -> bytes:
+            if channel_count <= 1:
+                return raw_bytes
+
+            samples = array("h")
+            samples.frombytes(raw_bytes)
+            frame_count = len(samples) // channel_count
+            mixed = array("h", [0]) * frame_count
+
+            for frame_index in range(frame_count):
+                base = frame_index * channel_count
+                total = 0
+                for channel_index in range(channel_count):
+                    total += samples[base + channel_index]
+                mixed[frame_index] = int(total / channel_count)
+
+            return mixed.tobytes()
         
         def input_callback(indata, frames, time, status):
             if self.is_running:
                 raw = bytes(indata)
-                self.recording_input.extend(raw)
-                self.loop.call_soon_threadsafe(self.input_queue.put_nowait, raw)
+                raw_mono = _downmix_to_mono(raw, self.input_channels)
+                if self.input_device_rate != self.input_rate:
+                    raw_mono = self._resample(raw_mono, self.input_device_rate, self.input_rate)
+                self.recording_input.extend(raw_mono)
+                self.loop.call_soon_threadsafe(self.input_queue.put_nowait, raw_mono)
 
         # RawInputStream nutzt direkt int16 bytes (16-bit PCM little endian)
         self.in_stream = sd.RawInputStream(
-            samplerate=self.input_rate,
-            channels=self.channels,
+            samplerate=self.input_device_rate,
+            channels=self.input_channels,
             dtype='int16',
             blocksize=self.chunk_size,
             latency='low',
+            device=self.input_device_index,
             callback=input_callback
         )
+        try:
+            if self.input_device_index is not None:
+                device_info = sd.query_devices(self.input_device_index)
+                logger.info(
+                    "Audio input device: #%s %s (%s Hz, %s ch)",
+                    self.input_device_index,
+                    device_info.get("name", "unknown"),
+                    self.input_device_rate,
+                    self.input_channels,
+                )
+            else:
+                logger.info("Audio input device: system default (%s Hz, %s ch)", self.input_device_rate, self.input_channels)
+        except Exception:
+            logger.info("Audio input device konnte nicht aufgelöst werden.")
         
         # Viele Consumer-Devices klingen bei 24kHz verzerrt. Primär 48kHz verwenden,
         # auf 24kHz fallbacken falls das Gerät 48kHz nicht unterstützt.
