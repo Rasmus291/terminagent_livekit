@@ -377,6 +377,50 @@
     }
 
     .audio-item audio { width: 100%; }
+
+    .monitor-layout {
+      display: grid;
+      grid-template-columns: 220px 1fr 1fr;
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    @media (max-width: 860px) {
+      .monitor-layout { grid-template-columns: 1fr; }
+    }
+
+    .monitor-panel {
+      border: 1px solid var(--gray-200);
+      border-radius: 10px;
+      padding: 14px;
+      background: white;
+    }
+
+    .monitor-panel h4 {
+      font-size: 14px;
+      margin-bottom: 8px;
+    }
+
+    .monitor-meta {
+      font-size: 12px;
+      color: var(--gray-500);
+      line-height: 1.5;
+    }
+
+    .monitor-status {
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--gray-700);
+      font-weight: 500;
+    }
+
+    .monitor-state-live { color: var(--success); }
+    .monitor-state-idle { color: var(--gray-500); }
+
+    .btn-monitor {
+      width: 100%;
+      justify-content: center;
+    }
   </style>
 </head>
 <body>
@@ -440,6 +484,32 @@
 
   <div class="card card-wide">
     <div class="card-header">
+      <span class="icon">🎧</span>
+      Live-Audio-Monitor
+    </div>
+    <div class="card-body">
+      <div class="monitor-layout">
+        <div class="monitor-panel">
+          <button id="btn-live-monitor" class="btn btn-primary btn-monitor">🎧 Live-Mithören starten</button>
+          <div class="monitor-status" id="monitor-connection-status">Nicht verbunden</div>
+          <div class="monitor-meta" id="monitor-call-meta" style="margin-top:10px;">Kein aktiver Anruf.</div>
+        </div>
+        <div class="monitor-panel">
+          <h4>Partner</h4>
+          <div id="partner-monitor-status" class="monitor-status monitor-state-idle">Warte auf Audio…</div>
+          <div class="monitor-meta">Live-Ausgabe der Sprache des angerufenen Partners.</div>
+        </div>
+        <div class="monitor-panel">
+          <h4>Agent</h4>
+          <div id="agent-monitor-status" class="monitor-status monitor-state-idle">Warte auf Audio…</div>
+          <div class="monitor-meta">Live-Ausgabe der Stimme von Anna / Agent.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card card-wide">
+    <div class="card-header">
       <span class="icon">🕘</span>
       Letzte Anrufe
       <button class="btn-refresh" onclick="loadCallHistory()">↻ Aktualisieren</button>
@@ -464,6 +534,11 @@
   let statusPollTimer = null;
   let historyItems = [];
   let selectedSessionId = null;
+  let monitorSocket = null;
+  let monitorAudioContext = null;
+  let monitorEnabled = false;
+  let monitorNextTimes = { partner: 0, agent: 0 };
+  let monitorGainNodes = { partner: null, agent: null };
 
   // --- Status check ---
   async function checkStatus() {
@@ -535,6 +610,147 @@
         </div>
       `;
     }).join('');
+  }
+
+  function updateMonitorConnectionStatus(text, isLive = false) {
+    const el = document.getElementById('monitor-connection-status');
+    el.textContent = text;
+    el.className = 'monitor-status ' + (isLive ? 'monitor-state-live' : 'monitor-state-idle');
+  }
+
+  function updateMonitorTrackStatus(track, text, isLive = false) {
+    const el = document.getElementById(`${track}-monitor-status`);
+    el.textContent = text;
+    el.className = 'monitor-status ' + (isLive ? 'monitor-state-live' : 'monitor-state-idle');
+  }
+
+  function updateMonitorCallMeta(text) {
+    document.getElementById('monitor-call-meta').textContent = text;
+  }
+
+  function resetMonitorTrackStatus() {
+    updateMonitorTrackStatus('partner', 'Warte auf Audio…', false);
+    updateMonitorTrackStatus('agent', 'Warte auf Audio…', false);
+  }
+
+  async function toggleLiveMonitor() {
+    if (monitorEnabled) {
+      stopLiveMonitor();
+      return;
+    }
+    await startLiveMonitor();
+  }
+
+  async function startLiveMonitor() {
+    const btn = document.getElementById('btn-live-monitor');
+    try {
+      if (!monitorAudioContext) {
+        monitorAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        monitorGainNodes.partner = monitorAudioContext.createGain();
+        monitorGainNodes.agent = monitorAudioContext.createGain();
+        monitorGainNodes.partner.connect(monitorAudioContext.destination);
+        monitorGainNodes.agent.connect(monitorAudioContext.destination);
+      }
+
+      await monitorAudioContext.resume();
+
+      const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      monitorSocket = new WebSocket(`${wsScheme}://${window.location.host}/monitor/ws`);
+      monitorEnabled = true;
+      btn.textContent = '🛑 Live-Mithören stoppen';
+      updateMonitorConnectionStatus('Verbinde…', false);
+      resetMonitorTrackStatus();
+
+      monitorSocket.onopen = () => {
+        updateMonitorConnectionStatus('Live-Monitor verbunden', true);
+      };
+
+      monitorSocket.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        handleMonitorMessage(payload);
+      };
+
+      monitorSocket.onclose = () => {
+        if (monitorEnabled) {
+          updateMonitorConnectionStatus('Verbindung getrennt', false);
+        }
+      };
+
+      monitorSocket.onerror = () => {
+        updateMonitorConnectionStatus('Monitor-Fehler', false);
+      };
+    } catch (e) {
+      monitorEnabled = false;
+      btn.textContent = '🎧 Live-Mithören starten';
+      updateMonitorConnectionStatus('Audio konnte nicht gestartet werden', false);
+      showToast('❌ Live-Monitor', e.message || String(e), 'error');
+    }
+  }
+
+  function stopLiveMonitor() {
+    monitorEnabled = false;
+    if (monitorSocket) {
+      try { monitorSocket.close(); } catch {}
+      monitorSocket = null;
+    }
+    monitorNextTimes = { partner: 0, agent: 0 };
+    document.getElementById('btn-live-monitor').textContent = '🎧 Live-Mithören starten';
+    updateMonitorConnectionStatus('Nicht verbunden', false);
+    updateMonitorCallMeta('Kein aktiver Anruf.');
+    resetMonitorTrackStatus();
+  }
+
+  function handleMonitorMessage(payload) {
+    if (payload.type === 'state') {
+      if (payload.active) {
+        updateMonitorCallMeta(`Aktiver Anruf: ${payload.contact_name || payload.caller_id || 'Unbekannt'}`);
+      } else {
+        updateMonitorCallMeta('Kein aktiver Anruf.');
+      }
+      return;
+    }
+
+    if (payload.type === 'call-start') {
+      updateMonitorCallMeta(`Aktiver Anruf: ${payload.contact_name || payload.caller_id || 'Unbekannt'}`);
+      resetMonitorTrackStatus();
+      return;
+    }
+
+    if (payload.type === 'call-end') {
+      updateMonitorCallMeta('Kein aktiver Anruf.');
+      resetMonitorTrackStatus();
+      return;
+    }
+
+    if (payload.type === 'audio' && payload.pcm16) {
+      playMonitorChunk(payload.track, payload.sample_rate, payload.pcm16);
+      updateMonitorTrackStatus(payload.track, '🔊 Audio läuft', true);
+    }
+  }
+
+  function playMonitorChunk(track, sampleRate, base64Pcm) {
+    if (!monitorEnabled || !monitorAudioContext || !monitorGainNodes[track]) return;
+
+    const binary = atob(base64Pcm);
+    const sampleCount = Math.floor(binary.length / 2);
+    const audioBuffer = monitorAudioContext.createBuffer(1, sampleCount, sampleRate || 16000);
+    const channel = audioBuffer.getChannelData(0);
+
+    for (let i = 0; i < sampleCount; i++) {
+      const lo = binary.charCodeAt(i * 2);
+      const hi = binary.charCodeAt(i * 2 + 1);
+      let sample = (hi << 8) | lo;
+      if (sample >= 0x8000) sample -= 0x10000;
+      channel[i] = sample / 32768;
+    }
+
+    const source = monitorAudioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(monitorGainNodes[track]);
+
+    const startAt = Math.max(monitorAudioContext.currentTime + 0.05, monitorNextTimes[track] || 0);
+    source.start(startAt);
+    monitorNextTimes[track] = startAt + audioBuffer.duration;
   }
 
   async function openHistoryDetail(sessionId) {
@@ -652,6 +868,11 @@
 
   function refreshButtonStates() {
     setManualButtonAsCall();
+    document.querySelectorAll('[id^="btn-contact-"]').forEach((btn) => {
+      btn.style.background = '';
+      btn.innerHTML = '📞 Anrufen';
+    });
+
     if (!activeCall) return;
 
     if (activeCall.source === 'manual') {
@@ -812,6 +1033,7 @@
 
   // Init
   document.getElementById('btn-manual-call').onclick = handleManualButton;
+  document.getElementById('btn-live-monitor').onclick = toggleLiveMonitor;
   checkStatus();
   loadContacts();
   loadCallHistory();
