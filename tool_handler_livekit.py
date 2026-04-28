@@ -233,13 +233,18 @@ async def end_call(reason: str = "completed") -> dict:
     logger.info(f"end_call() aufgerufen. partner_farewell_detected={partner_farewell_detected}, reason={reason}")
     
     if not partner_farewell_detected:
-        pending_end_call = True
-        logger.warning("❌ EndCall-Request erhalten, aber Partner hat sich nicht verabschiedet.")
-        return {
-            "status": "deferred",
-            "reason": "waiting_for_partner_farewell",
-            "message": "Partner hat sich noch nicht verabschiedet. Bitte freundlich abschließen und dann still sein.",
-        }
+        # Bei bestätigtem Termin oder wenn Agent sich bereits verabschiedet hat:
+        # Nicht auf Partner-Farewell warten (Partner legt oft einfach auf)
+        if has_confirmed_appointment() or assistant_farewell_detected:
+            logger.info("Partner hat sich nicht verabschiedet, aber Termin bestätigt/Agent verabschiedet. Beende trotzdem.")
+        else:
+            pending_end_call = True
+            logger.warning("❌ EndCall-Request erhalten, aber Partner hat sich nicht verabschiedet.")
+            return {
+                "status": "deferred",
+                "reason": "waiting_for_partner_farewell",
+                "message": "Partner hat sich noch nicht verabschiedet. Bitte freundlich abschließen und dann still sein.",
+            }
 
     logger.info("=" * 60)
     logger.info("🛑 ANRUF WIRD BEENDET")
