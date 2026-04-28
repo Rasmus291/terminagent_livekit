@@ -209,16 +209,17 @@ async def lavita_agent(ctx: JobContext):
             temperature=0.6,
         ),
         vad=silero.VAD.load(
-            min_silence_duration=0.15,
-            min_speech_duration=0.08,
-            prefix_padding_duration=0.1,
+            min_silence_duration=0.3,
+            min_speech_duration=0.15,
+            prefix_padding_duration=0.15,
+            activation_threshold=0.6,
         ),
         turn_handling={
             "turn_detection": "realtime_llm",
             "endpointing": {
                 "mode": "dynamic",
-                "min_delay": 0.1,
-                "max_delay": 0.5,
+                "min_delay": 0.2,
+                "max_delay": 0.6,
             },
         },
     )
@@ -424,12 +425,12 @@ async def lavita_agent(ctx: JobContext):
             logger.error(f"Fehler beim Session-Start: {e}", exc_info=True)
             raise
 
-        # Kurz warten damit Gemini-WebSocket bereit ist
-        await asyncio.sleep(0.5)
+        # Minimal warten damit Gemini-WebSocket bereit ist
+        await asyncio.sleep(0.1)
         try:
-            logger.info("Stoße Gesprächseröffnung einmalig an...")
+            logger.info("Stoße Gesprächseröffnung sofort an...")
             session.generate_reply(
-                user_input=f"{_START_TRIGGER_PREFIX} Beginne jetzt das Gespräch.",
+                user_input=f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. Begrüße ihn SOFORT.",
             )
         except Exception as e:
             logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
