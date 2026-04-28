@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LaVita Terminagent</title>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --gray-50: #f9fafb;
+      --gray-100: #f3f4f6;
+      --gray-200: #e5e7eb;
+      --gray-300: #d1d5db;
+      --gray-500: #6b7280;
+      --gray-700: #374151;
+      --gray-900: #111827;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--gray-50);
+      color: var(--gray-900);
+      min-height: 100vh;
+    }
+
+    header {
+      background: white;
+      border-bottom: 1px solid var(--gray-200);
+      padding: 0 24px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: var(--shadow);
+    }
+
+    header .logo {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    header .subtitle {
+      color: var(--gray-500);
+      font-size: 14px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--gray-300);
+      margin-left: auto;
+    }
+    .status-dot.online { background: var(--success); box-shadow: 0 0 0 2px #bbf7d0; }
+
+    main {
+      max-width: 1100px;
+      margin: 32px auto;
+      padding: 0 24px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 720px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      background: white;
+      border-radius: var(--radius);
+      border: 1px solid var(--gray-200);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--gray-100);
+      font-weight: 600;
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .card-header .icon {
+      font-size: 18px;
+    }
+
+    .card-body {
+      padding: 20px;
+    }
+
+    /* Manual call form */
+    .form-group { margin-bottom: 16px; }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--gray-700);
+      margin-bottom: 6px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--gray-300);
+      border-radius: 8px;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .form-group input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: background 0.15s, transform 0.1s;
+    }
+
+    .btn:active { transform: scale(0.98); }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+      width: 100%;
+      justify-content: center;
+      padding: 12px;
+      font-size: 15px;
+    }
+
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-primary:disabled { background: var(--gray-300); cursor: not-allowed; transform: none; }
+
+    .btn-call {
+      background: var(--success);
+      color: white;
+      padding: 8px 14px;
+      font-size: 13px;
+    }
+
+    .btn-call:hover { background: #15803d; }
+
+    /* Contacts table */
+    .contact-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .contact-table th {
+      text-align: left;
+      padding: 10px 12px;
+      background: var(--gray-50);
+      border-bottom: 1px solid var(--gray-200);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--gray-500);
+    }
+
+    .contact-table td {
+      padding: 12px 12px;
+      border-bottom: 1px solid var(--gray-100);
+      vertical-align: middle;
+    }
+
+    .contact-table tr:last-child td { border-bottom: none; }
+
+    .contact-table tr:hover td { background: var(--gray-50); }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .badge-blue { background: #dbeafe; color: #1d4ed8; }
+    .badge-green { background: #dcfce7; color: #15803d; }
+    .badge-gray { background: var(--gray-100); color: var(--gray-500); }
+
+    /* Loading / empty states */
+    .loading, .empty {
+      text-align: center;
+      padding: 40px;
+      color: var(--gray-500);
+      font-size: 14px;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--gray-200);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-bottom: 8px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Toast notifications */
+    #toast-container {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .toast {
+      background: white;
+      border: 1px solid var(--gray-200);
+      border-left: 4px solid var(--primary);
+      border-radius: 8px;
+      padding: 12px 16px;
+      box-shadow: var(--shadow-lg);
+      max-width: 320px;
+      font-size: 14px;
+      animation: slideIn 0.2s ease;
+    }
+
+    .toast.success { border-left-color: var(--success); }
+    .toast.error { border-left-color: var(--danger); }
+
+    .toast-title { font-weight: 600; margin-bottom: 2px; }
+    .toast-msg { color: var(--gray-500); font-size: 13px; }
+
+    @keyframes slideIn {
+      from { transform: translateX(20px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    /* Refresh button */
+    .btn-refresh {
+      background: none;
+      border: 1px solid var(--gray-200);
+      padding: 5px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--gray-500);
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-refresh:hover { background: var(--gray-50); }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">LaVita</span>
+  <span class="subtitle">Terminagent</span>
+  <div id="status-dot" class="status-dot" title="Server-Status"></div>
+</header>
+
+<main>
+
+  <!-- Manual Call Card -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">📞</span>
+      Manuellen Anruf starten
+    </div>
+    <div class="card-body">
+      <div class="form-group">
+        <label>Name des Kontakts</label>
+        <input type="text" id="manual-name" placeholder="z.B. Max Mustermann" />
+      </div>
+      <div class="form-group">
+        <label>Telefonnummer</label>
+        <input type="tel" id="manual-phone" placeholder="+491234567890" />
+      </div>
+      <button class="btn btn-primary" id="btn-manual-call" onclick="startManualCall()">
+        <span>📞</span> Jetzt anrufen
+      </button>
+    </div>
+  </div>
+
+  <!-- Contacts List Card -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">📋</span>
+      Kontakte aus Excel
+      <button class="btn-refresh" onclick="loadContacts()">
+        ↻ Aktualisieren
+      </button>
+    </div>
+    <div class="card-body" style="padding: 0;">
+      <div id="contacts-state" class="loading">
+        <div class="spinner"></div><br>Kontakte werden geladen…
+      </div>
+      <table class="contact-table" id="contacts-table" style="display:none;">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Name</th>
+            <th>Telefon</th>
+            <th>Firma</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="contacts-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<div id="toast-container"></div>
+
+<script>
+  const API = '';  // same origin
+
+  // --- Status check ---
+  async function checkStatus() {
+    try {
+      const r = await fetch(API + '/twilio/contacts');
+      document.getElementById('status-dot').className = 'status-dot ' + (r.ok ? 'online' : '');
+    } catch {
+      document.getElementById('status-dot').className = 'status-dot';
+    }
+  }
+
+  // --- Load contacts ---
+  async function loadContacts() {
+    const state = document.getElementById('contacts-state');
+    const table = document.getElementById('contacts-table');
+    state.innerHTML = '<div class="spinner"></div><br>Kontakte werden geladen…';
+    state.style.display = 'block';
+    table.style.display = 'none';
+
+    try {
+      const r = await fetch(API + '/twilio/contacts');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      renderContacts(data.contacts || []);
+    } catch(e) {
+      state.innerHTML = '❌ Fehler beim Laden: ' + e.message;
+    }
+  }
+
+  function renderContacts(contacts) {
+    const state = document.getElementById('contacts-state');
+    const table = document.getElementById('contacts-table');
+    const tbody = document.getElementById('contacts-body');
+
+    if (!contacts.length) {
+      state.innerHTML = 'Keine Kontakte gefunden.';
+      state.style.display = 'block';
+      table.style.display = 'none';
+      return;
+    }
+
+    tbody.innerHTML = contacts.map(c => `
+      <tr>
+        <td><span class="badge badge-gray">${c.contact_id}</span></td>
+        <td><strong>${esc(c.name || '-')}</strong></td>
+        <td style="font-family: monospace; font-size: 13px;">${esc(c.phone || '—')}</td>
+        <td>${c.company ? '<span class="badge badge-blue">' + esc(c.company) + '</span>' : '<span style="color:var(--gray-300)">—</span>'}</td>
+        <td>
+          ${c.phone
+            ? `<button class="btn btn-call" onclick="callContact(${c.contact_id}, '${esc(c.name)}')">📞 Anrufen</button>`
+            : '<span style="font-size:12px;color:var(--gray-300)">Kein Telefon</span>'
+          }
+        </td>
+      </tr>
+    `).join('');
+
+    state.style.display = 'none';
+    table.style.display = 'table';
+  }
+
+  // --- Call from contacts ---
+  async function callContact(contactId, name) {
+    showToast('Verbinde…', `Anruf für ${name} wird gestartet`, 'info');
+    try {
+      const r = await fetch(API + '/twilio/call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: String(contactId) })
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+      showToast('✅ Anruf gestartet', `${name} wird angerufen (${data.to || ''})`, 'success');
+    } catch(e) {
+      showToast('❌ Fehler', e.message, 'error');
+    }
+  }
+
+  // --- Manual call ---
+  async function startManualCall() {
+    const name = document.getElementById('manual-name').value.trim();
+    const phone = document.getElementById('manual-phone').value.trim();
+    if (!phone) { showToast('Bitte Nummer eingeben', '', 'error'); return; }
+
+    const btn = document.getElementById('btn-manual-call');
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;border-width:2px;margin:0"></div> Wird gestartet…';
+
+    try {
+      const r = await fetch(API + '/twilio/call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: phone, name: name || undefined })
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+      showToast('✅ Anruf gestartet', `${name || phone} wird angerufen`, 'success');
+      document.getElementById('manual-name').value = '';
+      document.getElementById('manual-phone').value = '';
+    } catch(e) {
+      showToast('❌ Fehler', e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<span>📞</span> Jetzt anrufen';
+    }
+  }
+
+  // --- Toast ---
+  function showToast(title, msg, type = 'info') {
+    const c = document.getElementById('toast-container');
+    const t = document.createElement('div');
+    t.className = 'toast ' + (type === 'success' ? 'success' : type === 'error' ? 'error' : '');
+    t.innerHTML = `<div class="toast-title">${esc(title)}</div>${msg ? '<div class="toast-msg">' + esc(msg) + '</div>' : ''}`;
+    c.appendChild(t);
+    setTimeout(() => t.remove(), 4000);
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // Init
+  checkStatus();
+  loadContacts();
+  setInterval(checkStatus, 30000);
+</script>
+</body>
+</html>
