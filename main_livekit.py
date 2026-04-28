@@ -206,14 +206,9 @@ async def lavita_agent(ctx: JobContext):
             api_key=GEMINI_API_KEY,
             instructions=runtime_instruction,
             language="de-DE",
-            temperature=0.6,
         ),
-        vad=silero.VAD.load(
-            min_silence_duration=0.3,
-            min_speech_duration=0.15,
-            prefix_padding_duration=0.15,
-            activation_threshold=0.6,
-        ),
+        # VAD deaktiviert — Gemini Realtime übernimmt Turn Detection nativ
+        # Silero VAD verursacht Stottern durch Echo-Erkennung bei SIP-Calls
         turn_handling={
             "turn_detection": "realtime_llm",
             "endpointing": {
