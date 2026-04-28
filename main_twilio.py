@@ -26,6 +26,8 @@ import datetime
 import logging
 import time
 import wave
+import glob
+import re
 from copy import deepcopy
 from urllib.parse import urlencode, parse_qs
 
@@ -102,6 +104,79 @@ app = FastAPI()
 _frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.isdir(_frontend_dir):
     app.mount("/ui", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
+
+_sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
+if os.path.isdir(_sessions_dir):
+    app.mount("/media/sessions", StaticFiles(directory=_sessions_dir), name="sessions-media")
+
+
+def _extract_section(markdown_text: str, title: str) -> str:
+    pattern = rf"^##\s+{re.escape(title)}\s*$"
+    lines = markdown_text.splitlines()
+    start_index = None
+    for idx, line in enumerate(lines):
+        if re.match(pattern, line.strip()):
+            start_index = idx + 1
+            break
+    if start_index is None:
+        return ""
+
+    collected = []
+    for line in lines[start_index:]:
+        if line.startswith("## "):
+            break
+        collected.append(line)
+    return "\n".join(collected).strip()
+
+
+def _parse_session_report(session_path: str) -> dict:
+    filename = os.path.basename(session_path)
+    session_id = filename.replace("session_", "").replace(".md", "")
+
+    try:
+        with open(session_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        content = ""
+
+    summary = _extract_section(content, "Zusammenfassung")
+    transcript = _extract_section(content, "Transkript")
+    call_details = _extract_section(content, "Anruf-Details")
+    term_data = _extract_section(content, "Termindaten")
+
+    def _pick(pattern: str, source: str) -> str:
+        match = re.search(pattern, source, re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    date_time = _pick(r"\*\*Datum\s*&\s*Uhrzeit:\*\*\s*(.+)", call_details)
+    duration = _pick(r"\*\*Gespr[aä]chsdauer:\*\*\s*(.+)", call_details)
+    partner = _pick(r"\*\*Partner:\*\*\s*(.+)", term_data)
+    status = _pick(r"\*\*Status:\*\*\s*(.+)", term_data)
+    appointment_date = _pick(r"\*\*Termin:\*\*\s*(.+)", term_data)
+
+    audio_files = []
+    for prefix in ["recording_", "recording_user_", "recording_agent_"]:
+        audio_name = f"{prefix}{session_id}.wav"
+        full_path = os.path.join(_sessions_dir, audio_name)
+        if os.path.exists(full_path):
+            audio_files.append({
+                "name": audio_name,
+                "url": f"/media/sessions/{audio_name}",
+            })
+
+    return {
+        "session_id": session_id,
+        "filename": filename,
+        "date_time": date_time,
+        "duration": duration,
+        "partner": partner,
+        "status": status,
+        "appointment_date": appointment_date,
+        "summary": summary,
+        "summary_preview": (summary[:180] + "…") if len(summary) > 180 else summary,
+        "transcript": transcript,
+        "audio_files": audio_files,
+    }
 
 
 @app.post("/twilio/incoming")
@@ -550,6 +625,65 @@ async def initiate_call(request: Request):
     }
 
 
+@app.post("/twilio/hangup")
+async def hangup_call(request: Request):
+    """Beendet einen aktiven Twilio-Anruf per Call SID."""
+    try:
+        from twilio.rest import Client as TwilioClient
+    except ImportError:
+        return PlainTextResponse(
+            content="twilio Python SDK nicht installiert. pip install twilio",
+            status_code=500,
+        )
+
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN]):
+        return PlainTextResponse(content="Twilio Credentials fehlen in .env", status_code=500)
+
+    body = await request.json()
+    call_sid = str(body.get("call_sid", "")).strip()
+    if not call_sid:
+        return PlainTextResponse(content="'call_sid' fehlt", status_code=400)
+
+    client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    try:
+        call = client.calls(call_sid).update(status="completed")
+    except Exception as exc:
+        return PlainTextResponse(content=f"Anruf konnte nicht beendet werden: {exc}", status_code=500)
+
+    return {"call_sid": call.sid, "status": call.status}
+
+
+@app.get("/twilio/call-status/{call_sid}")
+async def call_status(call_sid: str):
+    """Liefert den aktuellen Status eines Twilio-Anrufs."""
+    try:
+        from twilio.rest import Client as TwilioClient
+    except ImportError:
+        return PlainTextResponse(
+            content="twilio Python SDK nicht installiert. pip install twilio",
+            status_code=500,
+        )
+
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN]):
+        return PlainTextResponse(content="Twilio Credentials fehlen in .env", status_code=500)
+
+    call_sid = str(call_sid or "").strip()
+    if not call_sid:
+        return PlainTextResponse(content="'call_sid' fehlt", status_code=400)
+
+    client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    try:
+        call = client.calls(call_sid).fetch()
+    except Exception as exc:
+        return PlainTextResponse(content=f"Status konnte nicht geladen werden: {exc}", status_code=500)
+
+    return {
+        "call_sid": call.sid,
+        "status": call.status,
+        "to": call.to,
+    }
+
+
 @app.get("/twilio/contacts")
 async def list_contacts():
     try:
@@ -562,6 +696,30 @@ async def list_contacts():
         "count": len(contacts),
         "contacts": contacts,
     }
+
+
+@app.get("/twilio/call-history")
+async def call_history(limit: int = 5):
+    if not os.path.isdir(_sessions_dir):
+        return {"count": 0, "items": []}
+
+    limit = max(1, min(limit, 100))
+    files = sorted(glob.glob(os.path.join(_sessions_dir, "session_*.md")), reverse=True)[:limit]
+    items = [_parse_session_report(path) for path in files]
+    return {"count": len(items), "items": items}
+
+
+@app.get("/twilio/call-history/{session_id}")
+async def call_history_detail(session_id: str):
+    safe_id = re.sub(r"[^0-9_]", "", session_id or "")
+    if not safe_id:
+        return PlainTextResponse(content="Ungültige Session-ID", status_code=400)
+
+    session_path = os.path.join(_sessions_dir, f"session_{safe_id}.md")
+    if not os.path.exists(session_path):
+        return PlainTextResponse(content="Session nicht gefunden", status_code=404)
+
+    return _parse_session_report(session_path)
 
 
 @app.get("/health")
