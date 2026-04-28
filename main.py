@@ -52,11 +52,25 @@ def _extract_role_text(entry: str, role: str):
 
 
 def _latest_role_text(transcript: list[str], role: str) -> str | None:
+    parts: list[str] = []
     for entry in reversed(transcript):
-        text = _extract_role_text(entry, role)
-        if text:
-            return text
-    return None
+        match = re.match(r"^\*\*\[[^\]]+\]\s+(User|Agent):\*\*\s*(.+)$", entry.strip())
+        if not match:
+            continue
+
+        found_role, text = match.group(1), match.group(2).strip()
+        if found_role == role:
+            if text:
+                parts.append(text)
+            continue
+
+        if parts:
+            break
+
+    if not parts:
+        return None
+
+    return " ".join(reversed(parts)).strip()
 
 
 def _mutual_farewell_detected(transcript: list[str]) -> bool:
