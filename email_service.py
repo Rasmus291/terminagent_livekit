@@ -17,6 +17,7 @@ Benötigt in .env:
 import os
 import logging
 import smtplib
+import re
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -44,6 +45,11 @@ def is_configured() -> bool:
         logger.warning("E-Mail-Konfiguration enthält Platzhalter. Bitte .env mit echten Werten aktualisieren.")
         return False
     return True
+
+
+def _parse_recipients(raw_recipients: str) -> list[str]:
+    recipients = [entry.strip() for entry in re.split(r"[;,]", raw_recipients or "") if entry.strip()]
+    return recipients
 
 
 def _parse_appointment_datetime(date_str: str) -> datetime | None:
@@ -136,6 +142,11 @@ def send_appointment_proposal(
     """
     if not is_configured():
         logger.warning("E-Mail nicht konfiguriert (SMTP_USER/SMTP_PASSWORD fehlen). Überspringe Benachrichtigung.")
+        return False
+
+    recipients = _parse_recipients(NOTIFICATION_EMAIL)
+    if not recipients:
+        logger.warning("E-Mail nicht konfiguriert (NOTIFICATION_EMAIL fehlt/ungültig). Überspringe Benachrichtigung.")
         return False
 
     analysis = analysis or {}
@@ -237,7 +248,7 @@ Stimmung: {sentiment_display}
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"{SENDER_NAME} <{SMTP_USER}>"
-    msg["To"] = NOTIFICATION_EMAIL
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(text, "plain"))
     msg.attach(MIMEText(html, "html"))
 
@@ -249,8 +260,8 @@ Stimmung: {sentiment_display}
             logger.debug(f"Authentifiziere als {SMTP_USER}...")
             server.login(SMTP_USER, SMTP_PASSWORD)
             logger.debug("Versende E-Mail...")
-            server.sendmail(SMTP_USER, NOTIFICATION_EMAIL, msg.as_string())
-        logger.info(f"✅ Terminvorschlag-Mail erfolgreich an {NOTIFICATION_EMAIL} gesendet")
+            server.sendmail(SMTP_USER, recipients, msg.as_string())
+        logger.info("✅ Terminvorschlag-Mail erfolgreich an %s gesendet", ", ".join(recipients))
         return True
     except smtplib.SMTPAuthenticationError as e:
         logger.error(f"❌ SMTP-Authentifizierung fehlgeschlagen (535): {e}")
@@ -265,4 +276,87 @@ Stimmung: {sentiment_display}
     except Exception as e:
         logger.error(f"❌ Unerwarteter Fehler beim E-Mail-Versand: {e}")
         logger.error("  → Mail-Bestätigung konnte nicht gesendet werden, Termin aber gespeichert.")
+        return False
+
+
+def send_call_result_summary(
+    call_start_time: str,
+    call_duration_seconds: float,
+    crm_data: dict | None,
+    analysis: dict | None,
+    transcript: list[str] | None,
+) -> bool:
+    """Sendet eine Ergebnis-Mail mit Gesprächsausgang und Kurz-Analyse."""
+    if not is_configured():
+        logger.warning("Ergebnis-Mail übersprungen: SMTP nicht konfiguriert.")
+        return False
+
+    recipients = _parse_recipients(NOTIFICATION_EMAIL)
+    if not recipients:
+        logger.warning("Ergebnis-Mail übersprungen: NOTIFICATION_EMAIL fehlt/ungültig.")
+        return False
+
+    crm_data = crm_data or {}
+    analysis = analysis or {}
+    transcript = transcript or []
+
+    partner_name = (crm_data.get("partner_name") or "Unbekannt").strip()
+    status = (crm_data.get("status") or analysis.get("ergebnis") or "unbekannt").strip()
+    appointment_date = (crm_data.get("appointment_date") or "-").strip() or "-"
+    contact_method = (crm_data.get("contact_method") or "-").strip() or "-"
+    notes = (crm_data.get("notes") or "-").strip() or "-"
+    sentiment = str(analysis.get("sentiment_gesamt") or "unbekannt")
+    summary = str(analysis.get("zusammenfassung") or "Keine automatische Zusammenfassung verfügbar.")
+
+    subject = f"Gesprächsergebnis: {partner_name} ({status})"
+    duration_display = f"{int(round(call_duration_seconds))}s"
+
+    text = (
+        "Gesprächsergebnis (LaVita Terminagent)\n\n"
+        f"Startzeit: {call_start_time}\n"
+        f"Dauer: {duration_display}\n"
+        f"Partner: {partner_name}\n"
+        f"Status: {status}\n"
+        f"Termin: {appointment_date}\n"
+        f"Kontaktart: {contact_method}\n"
+        f"Notizen: {notes}\n"
+        f"Sentiment gesamt: {sentiment}\n"
+        f"Zusammenfassung: {summary}\n"
+        f"Transkriptzeilen: {len(transcript)}\n"
+    )
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
+        <h2 style="color: #2c5530;">📋 Gesprächsergebnis</h2>
+        <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold; width: 180px;">Startzeit</td><td style="padding: 8px;">{call_start_time}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Dauer</td><td style="padding: 8px;">{duration_display}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Partner</td><td style="padding: 8px;">{partner_name}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Status</td><td style="padding: 8px;">{status}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Termin</td><td style="padding: 8px;">{appointment_date}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Kontaktart</td><td style="padding: 8px;">{contact_method}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Sentiment</td><td style="padding: 8px;">{sentiment}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Notizen</td><td style="padding: 8px;">{notes}</td></tr>
+            <tr><td style="padding: 8px; font-weight: bold; vertical-align: top;">Zusammenfassung</td><td style="padding: 8px;">{summary}</td></tr>
+        </table>
+        <p style="color: #777; font-size: 12px;">Transkriptzeilen: {len(transcript)}</p>
+    </div>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"{SENDER_NAME} <{SMTP_USER}>"
+    msg["To"] = ", ".join(recipients)
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, recipients, msg.as_string())
+        logger.info("✅ Ergebnis-Mail erfolgreich an %s gesendet", ", ".join(recipients))
+        return True
+    except Exception as e:
+        logger.error("❌ Ergebnis-Mail konnte nicht gesendet werden: %s", e)
         return False

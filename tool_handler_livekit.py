@@ -12,15 +12,12 @@ partner_farewell_detected = False
 assistant_farewell_detected = False
 call_ended = asyncio.Event()
 pending_end_call = False
-_ALLOWED_CONTACT_METHODS = {"phone", "video"}
+_ALLOWED_CONTACT_METHODS = {"phone"}
 _CONTACT_METHOD_ALIASES = {
     "telefon": "phone",
     "telefonisch": "phone",
     "phone": "phone",
     "anruf": "phone",
-    "video": "video",
-    "videocall": "video",
-    "video call": "video",
 }
 
 _FAREWELL_PATTERNS = (
@@ -29,18 +26,44 @@ _FAREWELL_PATTERNS = (
     r"\bauf wiedersehen\b",
     r"\bbis dann\b",
     r"\bbis bald\b",
+    r"\bbis sp(ä|ae)ter\b",
     r"\bbis zum termin\b",
     r"\bvielen dank\b",
     r"\bsch(ö|oe)nen tag noch\b",
+    r"\beinen sch(ö|oe)nen tag\b",
+    r"\balles gute\b",
+    r"\bmach'?s gut\b",
     r"\bciao\b",
+    r"\bwiedersehen\b",
+    r"\bade\b",
+    r"\badiö\b",
+    r"\bpfiat di\b",
+    r"\bahoi\b",
 )
+
+
+def _is_strict_farewell(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+
+    if "?" in normalized:
+        return False
+
+    tokens = re.findall(r"\w+", normalized)
+    if len(tokens) > 10:
+        return False
+
+    for pattern in _FAREWELL_PATTERNS:
+        if re.search(pattern, normalized):
+            return True
+    return False
 
 
 def has_confirmed_appointment() -> bool:
     return (
         (crm_data_saved.get("status") or "").strip().lower() == "scheduled"
         and bool((crm_data_saved.get("appointment_date") or "").strip())
-        and bool((crm_data_saved.get("contact_method") or "").strip())
     )
 
 
@@ -67,16 +90,14 @@ def mark_partner_farewell(text: str) -> bool:
     if partner_farewell_detected:
         return True
 
-    normalized = (text or "").lower()
-    for pattern in _FAREWELL_PATTERNS:
-        if re.search(pattern, normalized):
-            partner_farewell_detected = True
-            logger.info("Partner-Verabschiedung erkannt.")
-            if pending_end_call and not call_ended.is_set():
-                logger.info("Partner-Verabschiedung nach früherem end_call erkannt. Beende Gespräch jetzt.")
-                call_ended.set()
-            _trigger_end_if_both_farewells("partner")
-            return True
+    if _is_strict_farewell(text):
+        partner_farewell_detected = True
+        logger.info("Partner-Verabschiedung erkannt.")
+        if pending_end_call and not call_ended.is_set():
+            logger.info("Partner-Verabschiedung nach früherem end_call erkannt. Beende Gespräch jetzt.")
+            call_ended.set()
+        _trigger_end_if_both_farewells("partner")
+        return True
     return False
 
 
@@ -86,13 +107,11 @@ def mark_assistant_farewell(text: str) -> bool:
     if assistant_farewell_detected:
         return True
 
-    normalized = (text or "").lower()
-    for pattern in _FAREWELL_PATTERNS:
-        if re.search(pattern, normalized):
-            assistant_farewell_detected = True
-            logger.info("Agent-Verabschiedung erkannt.")
-            _trigger_end_if_both_farewells("assistant")
-            return True
+    if _is_strict_farewell(text):
+        assistant_farewell_detected = True
+        logger.info("Agent-Verabschiedung erkannt.")
+        _trigger_end_if_both_farewells("assistant")
+        return True
     return False
 
 
@@ -142,21 +161,21 @@ async def schedule_appointment(
         missing_fields: list[str] = []
         if not (appointment_date or "").strip():
             missing_fields.append("appointment_date")
-        if not normalized_contact_method:
-            missing_fields.append("contact_method")
         if missing_fields:
             logger.warning("Termin noch unvollständig, fehlende Felder: %s", ", ".join(missing_fields))
             return {
                 "status": "needs_more_info",
                 "missing_fields": missing_fields,
-                "message": "Bitte frage noch nach fehlenden Angaben (Terminzeit und wie der Partner erreichbar sein möchte), bevor du den Termin speicherst.",
+                "message": "Bitte frage noch nach fehlenden Angaben (konkrete Terminzeit), bevor du den Termin speicherst.",
             }
+        if not normalized_contact_method:
+            normalized_contact_method = "phone"
         if normalized_contact_method not in _ALLOWED_CONTACT_METHODS:
             logger.warning("Ungültige Kontaktart für Termin: %s", contact_method)
             return {
                 "status": "needs_more_info",
                 "missing_fields": ["contact_method"],
-                "message": "Erlaubte Kontaktarten sind nur Telefon oder Video. Frage bitte nicht nach Vor-Ort-Terminen.",
+                "message": "Erlaubte Kontaktart ist nur Telefon. Speichere den Termin bitte telefonisch.",
             }
 
     payload = {

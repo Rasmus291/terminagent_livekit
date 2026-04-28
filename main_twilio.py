@@ -20,7 +20,6 @@ Twilio Webhook URL setzen auf:
   https://<ngrok-url>/twilio/incoming
 """
 
-import io
 import os
 import asyncio
 import datetime
@@ -28,7 +27,7 @@ import logging
 import time
 import wave
 from copy import deepcopy
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 
 import uvicorn
 from dotenv import load_dotenv
@@ -60,6 +59,7 @@ from pipecat.transports.websocket.fastapi import (
 
 from config_pipecat import GEMINI_API_KEY, LLM_SETTINGS, TOOLS
 from contacts_excel import find_contact, get_contacts_excel_path, load_contacts, normalize_phone
+import email_service
 from tool_handler_pipecat import (
     handle_check_availability,
     handle_schedule_appointment,
@@ -67,6 +67,7 @@ from tool_handler_pipecat import (
     call_ended,
     crm_data_saved,
     mark_partner_farewell,
+    mark_assistant_farewell,
     reset_call_state,
 )
 from reporting_pipecat import save_session_report, generate_analysis, build_learning_brief
@@ -85,6 +86,11 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 # Server Config
 HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 PORT = int(os.getenv("SERVER_PORT", "8765"))
+MAILBOX_MESSAGE = os.getenv(
+    "TWILIO_MAILBOX_MESSAGE",
+    "Hallo, hier ist Anna von LaVita. Ich rufe an wegen eines kurzen Termins zur Abstimmung der Zusammenarbeit. "
+    "Bitte rufen Sie uns kurz zurück. Vielen Dank und auf Wiederhören.",
+)
 
 # Öffentliche URL (wird durch ngrok gesetzt)
 PUBLIC_URL = None
@@ -99,6 +105,26 @@ async def twilio_incoming(request: Request):
     Twilio ruft diese URL auf wenn ein Anruf verbunden wird.
     Antwort: TwiML das Twilio anweist, einen Media Stream WebSocket zu öffnen.
     """
+    body_bytes = await request.body()
+    form_data = parse_qs(body_bytes.decode("utf-8", errors="ignore")) if body_bytes else {}
+    answered_by = str((form_data.get("AnsweredBy") or [""])[0]).strip().lower()
+
+    # Twilio AMD: bei Mailbox/Fax eine kurze Ansage sprechen und auflegen
+    machine_answer = (
+        answered_by.startswith("machine")
+        or answered_by == "fax"
+        or answered_by == "unknown"
+    )
+    if machine_answer:
+        logger.info("Mailbox/Fax erkannt (AnsweredBy=%s). Starte Mailbox-Ansage.", answered_by or "-")
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Pause length="1"/>
+    <Say voice="alice" language="de-DE">{MAILBOX_MESSAGE}</Say>
+    <Hangup/>
+</Response>"""
+        return PlainTextResponse(content=twiml, media_type="text/xml")
+
     # Bestimme die WebSocket-URL basierend auf dem Host-Header
     host = request.headers.get("host", f"{HOST}:{PORT}")
     # Verwende wss:// wenn hinter einem Proxy (ngrok, etc.)
@@ -244,8 +270,8 @@ async def twilio_websocket(websocket: WebSocket):
             },
         ],
     )
-    user_turn_stop_speech_timeout = float(os.getenv("USER_TURN_SPEECH_TIMEOUT", "0.25"))
-    user_turn_stop_timeout = float(os.getenv("USER_TURN_STOP_TIMEOUT", "0.9"))
+    user_turn_stop_speech_timeout = float(os.getenv("USER_TURN_SPEECH_TIMEOUT", "0.12"))
+    user_turn_stop_timeout = float(os.getenv("USER_TURN_STOP_TIMEOUT", "0.35"))
     user_turn_strategies = UserTurnStrategies(
         start=[VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()],
         stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=user_turn_stop_speech_timeout)],
@@ -257,38 +283,37 @@ async def twilio_websocket(websocket: WebSocket):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context, user_params=user_params)
 
     # --- Audio Recording ---
-    audiobuffer = AudioBufferProcessor(num_channels=1)
+    audiobuffer = AudioBufferProcessor(sample_rate=16000, num_channels=1)
+    recording_user_audio = bytearray()
+    recording_agent_audio = bytearray()
+    recording_mono_audio = bytearray()
+    recording_sample_rate = 16000
+
+    def write_wav(path, audio_bytes, sample_rate, num_channels=1):
+        if not audio_bytes:
+            return
+        os.makedirs("sessions", exist_ok=True)
+        with wave.open(path, "wb") as wf:
+            wf.setsampwidth(2)
+            wf.setnchannels(num_channels)
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio_bytes)
 
     @audiobuffer.event_handler("on_track_audio_data")
     async def on_track_audio_data(buffer, user_audio, bot_audio, sample_rate, num_channels):
-        os.makedirs("sessions", exist_ok=True)
+        nonlocal recording_sample_rate
+        recording_sample_rate = sample_rate or recording_sample_rate
         if len(user_audio) > 0:
-            user_path = f"sessions/recording_user_{session_timestamp}.wav"
-            with wave.open(user_path, "wb") as wf:
-                wf.setsampwidth(2)
-                wf.setnchannels(1)
-                wf.setframerate(sample_rate)
-                wf.writeframes(user_audio)
-            logger.info(f"User-Audio gespeichert: {user_path}")
+            recording_user_audio.extend(user_audio)
         if len(bot_audio) > 0:
-            bot_path = f"sessions/recording_agent_{session_timestamp}.wav"
-            with wave.open(bot_path, "wb") as wf:
-                wf.setsampwidth(2)
-                wf.setnchannels(1)
-                wf.setframerate(sample_rate)
-                wf.writeframes(bot_audio)
-            logger.info(f"Agent-Audio gespeichert: {bot_path}")
+            recording_agent_audio.extend(bot_audio)
 
     @audiobuffer.event_handler("on_audio_data")
     async def on_audio_data(buffer, audio, sample_rate, num_channels):
+        nonlocal recording_sample_rate
+        recording_sample_rate = sample_rate or recording_sample_rate
         if len(audio) > 0:
-            mono_path = f"sessions/recording_{session_timestamp}.wav"
-            with wave.open(mono_path, "wb") as wf:
-                wf.setsampwidth(2)
-                wf.setnchannels(1)
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio)
-            logger.info(f"Mono-Aufnahme gespeichert: {mono_path}")
+            recording_mono_audio.extend(audio)
 
     # --- Transkription ---
     @user_aggregator.event_handler("on_user_turn_stopped")
@@ -308,6 +333,7 @@ async def twilio_websocket(websocket: WebSocket):
         if message.content:
             logger.info(f"Agent: {message.content}")
             session_transcript.append(f"**[{ts}] Agent:** {message.content}")
+            mark_assistant_farewell(message.content)
 
     # --- Pipeline ---
     pipeline = Pipeline(
@@ -347,21 +373,70 @@ async def twilio_websocket(websocket: WebSocket):
     try:
         await runner.run(task)
     finally:
+        try:
+            await audiobuffer.stop_recording()
+        except Exception as e:
+            logger.warning("Audio-Aufnahme konnte nicht sauber beendet werden: %s", e)
+
+        mono_path = f"sessions/recording_{session_timestamp}.wav"
+        user_path = f"sessions/recording_user_{session_timestamp}.wav"
+        agent_path = f"sessions/recording_agent_{session_timestamp}.wav"
+
+        try:
+            write_wav(mono_path, recording_mono_audio, recording_sample_rate, num_channels=1)
+            write_wav(user_path, recording_user_audio, recording_sample_rate, num_channels=1)
+            write_wav(agent_path, recording_agent_audio, recording_sample_rate, num_channels=1)
+        except Exception as e:
+            logger.warning("Audio-Dateien konnten nicht gespeichert werden: %s", e)
+
+        if recording_mono_audio:
+            logger.info("Mono-Aufnahme gespeichert: %s", mono_path)
+        if recording_user_audio:
+            logger.info("User-Audio gespeichert: %s", user_path)
+        if recording_agent_audio:
+            logger.info("Agent-Audio gespeichert: %s", agent_path)
+
         # Session Report
         call_duration = time.perf_counter() - session_start_perf
         call_start_str = session_start_time.strftime("%Y-%m-%d %H:%M:%S")
 
         logger.info("Generiere Analyse...")
-        analysis = generate_analysis(session_transcript)
+        try:
+            analysis = await asyncio.to_thread(generate_analysis, session_transcript)
+        except Exception as e:
+            logger.error("Analyse fehlgeschlagen: %s", e, exc_info=True)
+            analysis = {
+                "zusammenfassung": f"*Analyse-Fehler: {e}*",
+                "sentiment_partner": None,
+                "sentiment_gesamt": "unbekannt",
+                "stimmung_details": "",
+                "ergebnis": "unbekannt",
+            }
 
         logger.info("Speichere Session Report...")
-        save_session_report(
-            session_transcript,
-            crm_data=crm_data_saved or None,
-            call_duration=call_duration,
-            call_start_time=call_start_str,
-            analysis=analysis,
-        )
+        try:
+            save_session_report(
+                session_transcript,
+                crm_data=crm_data_saved or None,
+                call_duration=call_duration,
+                call_start_time=call_start_str,
+                analysis=analysis,
+                timestamp=session_timestamp,
+            )
+        except Exception as e:
+            logger.error("Session Report konnte nicht gespeichert werden: %s", e)
+
+        try:
+            email_service.send_call_result_summary(
+                call_start_time=call_start_str,
+                call_duration_seconds=call_duration,
+                crm_data=crm_data_saved or None,
+                analysis=analysis,
+                transcript=session_transcript,
+            )
+        except Exception as e:
+            logger.warning("Ergebnis-Mail Versand fehlgeschlagen: %s", e)
+
         logger.info(f"Call beendet. Dauer: {call_duration:.0f}s, Caller: {caller_id}")
 
 
@@ -452,7 +527,7 @@ async def initiate_call(request: Request):
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
         twiml=twiml,
-        machine_detection="Enable",
+        machine_detection="DetectMessageEnd",
         machine_detection_timeout=5,
     )
 

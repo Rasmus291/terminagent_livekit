@@ -174,11 +174,13 @@ async def format_available_slots(days_ahead: int = 5) -> str:
         return "Keine freien Termine in den nächsten Tagen gefunden."
 
     # Gruppiere nach Tag (deutsche Zeitzone)
+    _GERMAN_WEEKDAYS = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
+    _GERMAN_MONTHS = ["","Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"]
     tz = _get_booking_timezone()
     days: dict[str, list[str]] = {}
     for slot in slots:
         start = datetime.fromisoformat(slot["start_time"]).astimezone(tz)
-        day_key = start.strftime("%A, %d. %B %Y")
+        day_key = f"{_GERMAN_WEEKDAYS[start.weekday()]}, {start.day:02d}. {_GERMAN_MONTHS[start.month]} {start.year}"
         time_str = start.strftime("%H:%M")
         days.setdefault(day_key, []).append(time_str)
 
