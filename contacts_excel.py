@@ -1,6 +1,13 @@
 import os
 import re
+import time
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_contacts_cache = {}
+_last_mtime = {}
 
 
 def _normalize_header(value: Any) -> str:
@@ -35,6 +42,14 @@ def get_contacts_excel_path() -> str:
     return os.getenv("CONTACTS_EXCEL_PATH", "contacts.xlsx")
 
 
+def _get_file_mtime(path: str) -> float:
+    """Gets file modification time, returns 0 if file doesn't exist."""
+    try:
+        return os.path.getmtime(path)
+    except Exception:
+        return 0.0
+
+
 def load_contacts(excel_path: str | None = None, sheet_name: str | None = None) -> list[dict[str, str]]:
     try:
         from openpyxl import load_workbook
@@ -46,6 +61,16 @@ def load_contacts(excel_path: str | None = None, sheet_name: str | None = None) 
     workbook_path = excel_path or get_contacts_excel_path()
     if not os.path.exists(workbook_path):
         raise FileNotFoundError(f"Excel-Datei nicht gefunden: {workbook_path}")
+
+    cache_key = f"{workbook_path}:{sheet_name or 'default'}"
+    current_mtime = _get_file_mtime(workbook_path)
+
+    if cache_key in _contacts_cache:
+        if _last_mtime.get(cache_key) == current_mtime:
+            return _contacts_cache[cache_key]
+        logger.info(f"Excel-Datei hat sich geändert, lade neu: {workbook_path}")
+
+    _last_mtime[cache_key] = current_mtime
 
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
     worksheet = workbook[sheet_name] if sheet_name else workbook.active
@@ -73,7 +98,7 @@ def load_contacts(excel_path: str | None = None, sheet_name: str | None = None) 
         if not full_name:
             full_name = " ".join(part for part in [first_name, last_name] if part).strip()
 
-        phone = _pick(row, "phone", "phone_number", "mobile", "telefon", "telefonnummer", "handy")
+        phone = _pick(row, "phone", "phone_number", "mobile", "telefon", "telefonnummer", "handy", "nummer")
         normalized_phone = normalize_phone(phone)
         company = _pick(row, "company", "firma")
         notes = _pick(row, "notes", "notizen", "note")
@@ -95,6 +120,7 @@ def load_contacts(excel_path: str | None = None, sheet_name: str | None = None) 
             }
         )
 
+    _contacts_cache[cache_key] = contacts
     return contacts
 
 
