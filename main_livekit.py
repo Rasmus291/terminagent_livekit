@@ -206,18 +206,19 @@ async def lavita_agent(ctx: JobContext):
             api_key=GEMINI_API_KEY,
             instructions=runtime_instruction,
             language="de-DE",
+            temperature=0.6,
         ),
         vad=silero.VAD.load(
-            min_silence_duration=0.25,
-            min_speech_duration=0.1,
-            prefix_padding_duration=0.2,
+            min_silence_duration=0.15,
+            min_speech_duration=0.08,
+            prefix_padding_duration=0.1,
         ),
         turn_handling={
             "turn_detection": "realtime_llm",
             "endpointing": {
                 "mode": "dynamic",
-                "min_delay": 0.15,
-                "max_delay": 0.8,
+                "min_delay": 0.1,
+                "max_delay": 0.5,
             },
         },
     )
