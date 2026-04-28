@@ -52,6 +52,7 @@ from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
     FastAPIWebsocketParams,
@@ -84,6 +85,9 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 # Server Config
 HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 PORT = int(os.getenv("SERVER_PORT", "8765"))
+
+# Öffentliche URL (wird durch ngrok gesetzt)
+PUBLIC_URL = None
 
 app = FastAPI()
 
@@ -181,6 +185,10 @@ async def twilio_websocket(websocket: WebSocket):
             audio_in_sample_rate=16000,
             audio_out_sample_rate=24000,
             serializer=serializer,
+            vad_enabled=True,
+            vad_analyzer=SileroVADAnalyzer(
+                sample_rate=16000,
+            ),
         ),
     )
 
@@ -406,26 +414,44 @@ async def initiate_call(request: Request):
             status_code=500,
         )
 
-    host = request.headers.get("host", f"{HOST}:{PORT}")
-    scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
-    query = {}
-    if contact:
-        query = {
-            "contact_id": contact.get("contact_id", ""),
-            "contact_name": contact.get("name", ""),
-            "contact_first_name": contact.get("first_name", ""),
-            "contact_company": contact.get("company", ""),
-            "contact_notes": contact.get("notes", ""),
-        }
-    webhook_url = f"{scheme}://{host}/twilio/incoming"
-    if query:
-        webhook_url = f"{webhook_url}?{urlencode(query)}"
+    # Öffentliche URL für WebSocket-Stream
+    if PUBLIC_URL:
+        base_url = PUBLIC_URL
+    else:
+        host = request.headers.get("host", f"{HOST}:{PORT}")
+        scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
+        base_url = f"{scheme}://{host}"
+
+    # wss:// für HTTPS, ws:// für HTTP
+    ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://")
+    ws_url = f"{ws_base}/twilio/ws"
+
+    # Kontaktdaten als Stream-Parameter übergeben
+    contact_name = contact.get("name", "") if contact else ""
+    contact_first_name = contact.get("first_name", "") if contact else ""
+    contact_company = contact.get("company", "") if contact else ""
+    contact_notes = contact.get("notes", "") if contact else ""
+    contact_id_str = str(contact.get("contact_id", "")) if contact else ""
+
+    # TwiML direkt zusammenbauen (kein Webhook-Roundtrip nötig)
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{ws_url}">
+            <Parameter name="contact_name" value="{contact_name}" />
+            <Parameter name="contact_first_name" value="{contact_first_name}" />
+            <Parameter name="contact_company" value="{contact_company}" />
+            <Parameter name="contact_notes" value="{contact_notes}" />
+            <Parameter name="contact_id" value="{contact_id_str}" />
+        </Stream>
+    </Connect>
+</Response>"""
 
     client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     call = client.calls.create(
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
-        url=webhook_url,
+        twiml=twiml,
         machine_detection="Enable",
         machine_detection_timeout=5,
     )
@@ -465,8 +491,34 @@ if __name__ == "__main__":
         logger.error("GEMINI_API_KEY fehlt in .env!")
         exit(1)
 
+    # Öffentliche URL: aus .env oder automatisch via pyngrok
+    PUBLIC_URL = os.getenv("PUBLIC_URL")
+
+    if not PUBLIC_URL:
+        try:
+            from pyngrok import conf as ngrok_conf, ngrok as pyngrok_client
+
+            authtoken = os.getenv("NGROK_AUTHTOKEN")
+            if authtoken:
+                ngrok_conf.get_default().auth_token = authtoken
+
+            ngrok_conf.get_default().ngrok_version = "v3"
+            pyngrok_client.kill()
+
+            tunnel = pyngrok_client.connect(PORT, bind_tls=True)
+            PUBLIC_URL = tunnel.public_url
+            logger.info(f"ngrok Tunnel aktiv: {PUBLIC_URL}")
+        except ImportError:
+            logger.warning("pyngrok nicht installiert. Setze PUBLIC_URL in .env oder nutze ngrok manuell.")
+        except Exception as e:
+            logger.warning(f"ngrok Tunnel konnte nicht gestartet werden: {e}")
+            logger.warning("Setze PUBLIC_URL in .env auf deine öffentliche URL.")
+
     logger.info(f"Starte Twilio Server auf {HOST}:{PORT}")
-    logger.info(f"Twilio Webhook: http://{HOST}:{PORT}/twilio/incoming")
+    if PUBLIC_URL:
+        logger.info(f"Twilio Webhook: {PUBLIC_URL}/twilio/incoming")
+    else:
+        logger.info(f"Twilio Webhook: http://{HOST}:{PORT}/twilio/incoming")
     logger.info(f"Outbound Calls: POST http://{HOST}:{PORT}/twilio/call")
 
     uvicorn.run(app, host=HOST, port=PORT)

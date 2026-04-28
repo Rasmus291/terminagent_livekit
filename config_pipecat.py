@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, GeminiVADParams
+from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 
 load_dotenv()
 
@@ -226,7 +226,6 @@ LLM_SETTINGS = GeminiLiveLLMService.Settings(
     voice="Kore",
     language="de-DE",
     system_instruction=SYSTEM_INSTRUCTION,
-    # Gemini-Server-VAD deaktiviert → Pipecat/Silero-VAD übernimmt lokal.
-    # Das verhindert server-seitiges Clipping von Satzanfängen.
-    vad=GeminiVADParams(disabled=True),
+    # Gemini-Server-VAD aktiviert: Gemini erkennt Sprache selbst.
+    # Das ist zuverlässiger als lokales VAD über Twilio-Audio.
 )
