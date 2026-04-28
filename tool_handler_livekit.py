@@ -221,31 +221,11 @@ async def schedule_appointment(
 
 async def end_call(reason: str = "completed") -> dict:
     """
-    Beendet den Anruf. Checks ob sich Partner verabschiedet hat.
-    
-    Args:
-        reason: Grund für das Beenden (meist "completed" oder "declined")
-    
-    Returns:
-        Dict mit Status und Nachricht
+    Beendet den Anruf sofort und zuverlässig.
     """
     global pending_end_call
-    logger.info(f"end_call() aufgerufen. partner_farewell_detected={partner_farewell_detected}, reason={reason}")
+    logger.info(f"end_call() aufgerufen. reason={reason}")
     
-    if not partner_farewell_detected:
-        # Bei bestätigtem Termin oder wenn Agent sich bereits verabschiedet hat:
-        # Nicht auf Partner-Farewell warten (Partner legt oft einfach auf)
-        if has_confirmed_appointment() or assistant_farewell_detected:
-            logger.info("Partner hat sich nicht verabschiedet, aber Termin bestätigt/Agent verabschiedet. Beende trotzdem.")
-        else:
-            pending_end_call = True
-            logger.warning("❌ EndCall-Request erhalten, aber Partner hat sich nicht verabschiedet.")
-            return {
-                "status": "deferred",
-                "reason": "waiting_for_partner_farewell",
-                "message": "Partner hat sich noch nicht verabschiedet. Bitte freundlich abschließen und dann still sein.",
-            }
-
     logger.info("=" * 60)
     logger.info("🛑 ANRUF WIRD BEENDET")
     logger.info(f"Grund: {reason}")
@@ -254,11 +234,8 @@ async def end_call(reason: str = "completed") -> dict:
     logger.info(f"Status: {crm_data_saved.get('status', '-')}")
     logger.info("=" * 60)
     
-    # Signalisiere dem Main-Loop dass Auflegen bestätigt ist
-    logger.info("Setze call_ended Event...")
     pending_end_call = False
     call_ended.set()
-    logger.info(f"call_ended.is_set() = {call_ended.is_set()}")
     
     return {
         "status": "call_ended",

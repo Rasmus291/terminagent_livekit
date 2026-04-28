@@ -16,6 +16,7 @@ from livekit.plugins import google, silero
 from config import GEMINI_API_KEY, MODEL_ID, SYSTEM_INSTRUCTION
 from reporting_livekit import build_learning_brief, generate_analysis, save_session_report
 from tool_handler_livekit import (
+    assistant_farewell_detected,
     call_ended,
     check_availability,
     crm_data_saved,
@@ -255,6 +256,14 @@ async def lavita_agent(ctx: JobContext):
             logger.info("Agent: %s", text)
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
+            # Farewell-Timer: wenn Agent sich verabschiedet hat, nach 5s automatisch auflegen
+            if assistant_farewell_detected and not call_ended.is_set():
+                async def _farewell_timer():
+                    await asyncio.sleep(5)
+                    if not call_ended.is_set():
+                        logger.info("⏰ Farewell-Timer abgelaufen — erzwinge Auflegen.")
+                        call_ended.set()
+                asyncio.create_task(_farewell_timer())
 
     session.on("conversation_item_added", on_conversation_item)
 
