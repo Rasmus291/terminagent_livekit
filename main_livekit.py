@@ -376,13 +376,29 @@ async def lavita_agent(ctx: JobContext):
             except Exception as e:
                 logger.error("finalize_session fehlgeschlagen: %s", e, exc_info=True)
 
-            # SIP-Call aktiv auflegen: Room disconnecten bevor Session shutdown
-            logger.info("Trenne Room-Verbindung (legt SIP-Call auf)...")
+            # SIP-Call aktiv auflegen: SIP-Participant aus dem Room kicken
+            logger.info("Lege SIP-Call auf...")
             try:
-                await ctx.room.disconnect()
-                logger.info("Room getrennt — SIP-Call aufgelegt.")
+                from livekit.api import LiveKitAPI, RoomParticipantIdentity
+                lk_url = os.getenv("LIVEKIT_URL", "")
+                lk_key = os.getenv("LIVEKIT_API_KEY", "")
+                lk_secret = os.getenv("LIVEKIT_API_SECRET", "")
+                room_name = ctx.room.name
+
+                # Alle Remote-Participants (= SIP-Telefonteilnehmer) entfernen
+                async with LiveKitAPI(lk_url, lk_key, lk_secret) as lk:
+                    for identity, participant in ctx.room.remote_participants.items():
+                        logger.info("Entferne Participant %s aus Room %s...", identity, room_name)
+                        await lk.room.remove_participant(
+                            RoomParticipantIdentity(room=room_name, identity=identity)
+                        )
+                        logger.info("Participant %s entfernt — SIP-Call aufgelegt.", identity)
             except Exception as e:
-                logger.warning("Room-Disconnect fehlgeschlagen: %s", e)
+                logger.warning("SIP-Auflegen fehlgeschlagen: %s — versuche Room-Disconnect.", e)
+                try:
+                    await ctx.room.disconnect()
+                except Exception:
+                    pass
 
             logger.info("Fahre Session herunter (drain=False)...")
             session.shutdown(drain=False)
