@@ -181,27 +181,22 @@ async def schedule_appointment(
     effective_status = normalized_status or status
 
     booking_url = None
-    if calendly_service.is_configured() and effective_status == "scheduled":
+    if calendly_service.is_configured() and effective_status == "scheduled" and appointment_date:
         try:
-            booking_url = await calendly_service.create_scheduling_link()
+            booking_url = await calendly_service.create_scheduling_link(appointment_date=appointment_date)
             logger.info("  Calendly Buchungslink: %s", booking_url)
         except Exception as e:
             logger.warning("  Calendly Buchungslink konnte nicht erstellt werden: %s", e)
 
-    email_sent = email_service.send_appointment_proposal(
-        partner_name=partner_name or "Unbekannt",
-        appointment_date=appointment_date or "",
-        contact_method=normalized_contact_method or "",
-        notes=notes or "",
-        status=effective_status or "scheduled",
-        calendly_link=booking_url,
-    )
+    if booking_url:
+        crm_data_saved["calendly_link"] = booking_url
+
+    # E-Mail wird nach Gesprächsende in finalize_session gesendet,
+    # damit die Gesprächsanalyse in der Mail enthalten ist.
 
     result = {"status": "recorded"}
     if booking_url:
         result["calendly_booking_url"] = booking_url
-    if email_sent:
-        result["email_notification"] = "sent"
     return result
 
 

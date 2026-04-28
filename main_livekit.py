@@ -161,6 +161,20 @@ async def lavita_agent(ctx: JobContext):
             call_start_time=call_start_str,
             analysis=analysis,
         )
+
+        # E-Mail mit Gesprächsergebnis + Analyse versenden
+        if crm_data_saved:
+            import email_service
+
+            email_service.send_appointment_proposal(
+                partner_name=crm_data_saved.get("partner_name", "Unbekannt"),
+                appointment_date=crm_data_saved.get("appointment_date", ""),
+                notes=crm_data_saved.get("notes", ""),
+                status=crm_data_saved.get("status", "unbekannt"),
+                calendly_link=crm_data_saved.get("calendly_link"),
+                analysis=analysis,
+            )
+
         if reason:
             logger.info("Session beendet (%s).", reason)
 
@@ -222,41 +236,15 @@ async def lavita_agent(ctx: JobContext):
             logger.error(f"Fehler beim Session-Start: {e}", exc_info=True)
             raise
 
-        await asyncio.sleep(0.6)
+        # Warte bis Gemini-WebSocket vollständig aufgebaut ist
+        await asyncio.sleep(3.0)
         try:
             logger.info("Stoße Gesprächseröffnung einmalig an...")
             session.generate_reply(
-                user_input=(
-                    f"{_START_TRIGGER_PREFIX} Der Partner ist jetzt verbunden. "
-                    "Begrüße ihn zuerst und nenne kurz das Anliegen. "
-                    "Mache in der ersten Aussage keinen konkreten Terminslot. "
-                    "Nenne niemals interne Tool-Namen wie end_call oder schedule_appointment. "
-                    "Verwende dabei jetzt keine Tools."
-                ),
-                tools=[],
-                input_modality="text",
+                user_input=f"{_START_TRIGGER_PREFIX} Beginne jetzt das Gespräch.",
             )
         except Exception as e:
             logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
-
-        try:
-            await asyncio.wait_for(assistant_started_event.wait(), timeout=4.0)
-            logger.info("Agent hat Gesprächseröffnung geliefert.")
-        except asyncio.TimeoutError:
-            logger.warning("Keine Agent-Eröffnung erkannt. Einmaliger Fallback-Trigger...")
-            try:
-                session.generate_reply(
-                    user_input=(
-                        f"{_START_TRIGGER_PREFIX} Bitte starte jetzt sofort das Gespräch. "
-                        "Begrüße den Partner freundlich und nenne kurz das Anliegen. "
-                        "Mache in der ersten Aussage keinen konkreten Terminslot. "
-                        "Verwende dabei jetzt keine Tools."
-                    ),
-                    tools=[],
-                    input_modality="text",
-                )
-            except Exception as e:
-                logger.warning("Fallback-Start-Trigger fehlgeschlagen: %s", e)
 
     # Starte Session und End-Call Monitor parallel
     logger.info("Starte Agent-Loop (session + end_call_monitor)...")

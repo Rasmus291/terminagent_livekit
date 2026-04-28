@@ -60,7 +60,7 @@ def _parse_appointment_datetime(date_str: str) -> datetime | None:
 def _build_google_calendar_link(
     partner_name: str,
     appointment_date: str,
-    contact_method: str,
+    _contact_method: str,
     notes: str,
 ) -> str | None:
     """Erstellt einen Google Calendar One-Click-Link."""
@@ -71,13 +71,10 @@ def _build_google_calendar_link(
     start = dt.strftime("%Y%m%dT%H%M%S")
     end = (dt + timedelta(hours=1)).strftime("%Y%m%dT%H%M%S")
 
-    contact_display = {"phone": "Telefon", "video": "Video-Call", "in_person": "Vor Ort"}.get(
-        contact_method, contact_method or ""
-    )
     title = f"Termin mit {partner_name}"
-    details = f"Kontaktart: {contact_display}"
+    details = ""
     if notes:
-        details += f"\nNotizen: {notes}"
+        details = f"Notizen: {notes}"
 
     params = (
         f"action=TEMPLATE"
@@ -92,7 +89,7 @@ def _build_google_calendar_link(
 def _build_outlook_calendar_link(
     partner_name: str,
     appointment_date: str,
-    contact_method: str,
+    _contact_method: str,
     notes: str,
 ) -> str | None:
     """Erstellt einen Outlook Web One-Click-Link."""
@@ -103,13 +100,10 @@ def _build_outlook_calendar_link(
     start = dt.strftime("%Y-%m-%dT%H:%M:%S")
     end = (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    contact_display = {"phone": "Telefon", "video": "Video-Call", "in_person": "Vor Ort"}.get(
-        contact_method, contact_method or ""
-    )
     title = f"Termin mit {partner_name}"
-    body = f"Kontaktart: {contact_display}"
+    body = ""
     if notes:
-        body += f"\nNotizen: {notes}"
+        body = f"Notizen: {notes}"
 
     params = (
         f"path=/calendar/action/compose"
@@ -125,13 +119,17 @@ def _build_outlook_calendar_link(
 def send_appointment_proposal(
     partner_name: str,
     appointment_date: str,
-    contact_method: str,
     notes: str,
     status: str,
     calendly_link: str | None = None,
+    analysis: dict | None = None,
 ) -> bool:
     """
-    Sendet eine E-Mail mit dem Terminvorschlag an den Mitarbeiter.
+    Sendet eine E-Mail mit dem Gesprächsergebnis und Terminvorschlag an den Mitarbeiter.
+
+    Args:
+        analysis: Dict mit Feldern zusammenfassung, sentiment_partner,
+                  sentiment_gesamt, stimmung_details, ergebnis.
 
     Returns:
         True bei Erfolg, False bei Fehler.
@@ -140,25 +138,29 @@ def send_appointment_proposal(
         logger.warning("E-Mail nicht konfiguriert (SMTP_USER/SMTP_PASSWORD fehlen). Überspringe Benachrichtigung.")
         return False
 
+    analysis = analysis or {}
+
     subject = f"Neuer Terminvorschlag: {partner_name}"
     if status == "declined":
         subject = f"Absage: {partner_name}"
     elif status == "callback":
         subject = f"Rückruf gewünscht: {partner_name}"
 
-    # Kontaktart lesbar
-    contact_display = {
-        "phone": "Telefon",
-        "video": "Video-Call",
-        "in_person": "Vor Ort",
-    }.get(contact_method, contact_method or "Nicht angegeben")
+    zusammenfassung = analysis.get("zusammenfassung", "")
+    sentiment_gesamt = analysis.get("sentiment_gesamt", "unbekannt")
+    sentiment_partner = analysis.get("sentiment_partner")
+    stimmung_details = analysis.get("stimmung_details", "")
+
+    sentiment_display = sentiment_gesamt.capitalize()
+    if sentiment_partner is not None:
+        sentiment_display += f" ({sentiment_partner}/10)"
 
     # Kalender-Links aufbauen (nur bei vereinbartem Termin mit Datum)
     google_cal_link = None
     outlook_cal_link = None
     if status == "scheduled" and appointment_date:
-        google_cal_link = _build_google_calendar_link(partner_name, appointment_date, contact_method, notes)
-        outlook_cal_link = _build_outlook_calendar_link(partner_name, appointment_date, contact_method, notes)
+        google_cal_link = _build_google_calendar_link(partner_name, appointment_date, "", notes)
+        outlook_cal_link = _build_outlook_calendar_link(partner_name, appointment_date, "", notes)
 
     # Kalender-Buttons HTML
     calendar_buttons_html = ""
@@ -166,13 +168,23 @@ def send_appointment_proposal(
         button_style = "display: inline-block; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 5px 5px 5px 0; font-size: 14px;"
         calendar_buttons_html = '<div style="margin: 20px 0;">'
         calendar_buttons_html += '<p style="font-weight: bold; margin-bottom: 10px;">Termin direkt eintragen:</p>'
+        if calendly_link and status == "scheduled":
+            calendar_buttons_html += f'<a href="{calendly_link}" style="{button_style} background-color: #2c5530;">📅 Calendly – Termin bestätigen</a> '
         if google_cal_link:
             calendar_buttons_html += f'<a href="{google_cal_link}" style="{button_style} background-color: #4285F4;">📅 Google Calendar</a> '
         if outlook_cal_link:
             calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Outlook</a> '
-        if calendly_link and status == "scheduled":
-            calendar_buttons_html += f'<a href="{calendly_link}" style="{button_style} background-color: #2c5530;">📅 Calendly</a>'
         calendar_buttons_html += '</div>'
+
+    # Zusammenfassung HTML
+    zusammenfassung_html = ""
+    if zusammenfassung:
+        zusammenfassung_html = f"""
+        <div style="background-color: #f8f9fa; border-left: 4px solid #2c5530; padding: 12px 16px; margin: 20px 0;">
+            <p style="font-weight: bold; margin: 0 0 6px 0;">Gesprächszusammenfassung</p>
+            <p style="margin: 0;">{zusammenfassung}</p>
+        </div>
+        """
 
     # HTML E-Mail
     html = f"""
@@ -188,13 +200,16 @@ def send_appointment_proposal(
                 <td style="padding: 10px; font-weight: bold;">Status</td>
                 <td style="padding: 10px;">{'✅ Termin vereinbart' if status == 'scheduled' else '🔄 Rückruf' if status == 'callback' else '❌ Abgelehnt'}</td>
             </tr>
-            {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Datum & Uhrzeit</td><td style="padding: 10px;">' + appointment_date + '</td></tr>' if appointment_date else ''}
-            <tr style="border-bottom: 1px solid #eee;">
-                <td style="padding: 10px; font-weight: bold;">Kontaktart</td>
-                <td style="padding: 10px;">{contact_display}</td>
-            </tr>
+            {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Termin</td><td style="padding: 10px;">' + appointment_date + '</td></tr>' if appointment_date else ''}
             {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Notizen</td><td style="padding: 10px;">' + notes + '</td></tr>' if notes else ''}
+            <tr style="border-bottom: 1px solid #eee;">
+                <td style="padding: 10px; font-weight: bold;">Stimmung</td>
+                <td style="padding: 10px;">{sentiment_display}</td>
+            </tr>
+            {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 10px; font-weight: bold;">Stimmung Details</td><td style="padding: 10px;">' + stimmung_details + '</td></tr>' if stimmung_details else ''}
         </table>
+
+        {zusammenfassung_html}
 
         {calendar_buttons_html}
 
@@ -205,13 +220,15 @@ def send_appointment_proposal(
     """
 
     # Nur-Text Fallback
-    text = f"""Neuer Terminvorschlag
+    text = f"""Gesprächsergebnis – {partner_name}
 
 Partner: {partner_name}
 Status: {status}
-Datum: {appointment_date or 'Nicht festgelegt'}
-Kontaktart: {contact_display}
+Termin: {appointment_date or 'Nicht festgelegt'}
 Notizen: {notes or '-'}
+Stimmung: {sentiment_display}
+{f'Stimmung Details: {stimmung_details}' if stimmung_details else ''}
+{f'Zusammenfassung: {zusammenfassung}' if zusammenfassung else ''}
 {f'Google Calendar: {google_cal_link}' if google_cal_link else ''}
 {f'Outlook: {outlook_cal_link}' if outlook_cal_link else ''}
 {f'Calendly: {calendly_link}' if calendly_link else ''}
