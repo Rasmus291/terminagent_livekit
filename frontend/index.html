@@ -274,6 +274,109 @@
     }
 
     .btn-refresh:hover { background: var(--gray-50); }
+
+    .card-wide { grid-column: 1 / -1; }
+
+    .history-layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: 340px;
+    }
+
+    @media (max-width: 860px) {
+      .history-layout { grid-template-columns: 1fr; }
+    }
+
+    .history-list {
+      border-right: 1px solid var(--gray-100);
+      max-height: 460px;
+      overflow: auto;
+    }
+
+    .history-item {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--gray-100);
+      cursor: pointer;
+    }
+
+    .history-item:hover { background: var(--gray-50); }
+    .history-item.active { background: #eff6ff; }
+
+    .history-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+    .history-meta { font-size: 12px; color: var(--gray-500); }
+    .history-preview { margin-top: 6px; font-size: 12px; color: var(--gray-700); }
+
+    .history-detail {
+      padding: 16px;
+      max-height: 460px;
+      overflow: auto;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .detail-pill {
+      background: var(--gray-50);
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .detail-pill b { display: block; font-size: 11px; color: var(--gray-500); margin-bottom: 2px; }
+
+    .detail-section-title {
+      font-size: 13px;
+      color: var(--gray-500);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin: 14px 0 8px;
+    }
+
+    .detail-summary {
+      line-height: 1.45;
+      font-size: 14px;
+      color: var(--gray-900);
+      white-space: pre-wrap;
+    }
+
+    .detail-transcript {
+      line-height: 1.45;
+      font-size: 13px;
+      color: var(--gray-900);
+      white-space: pre-wrap;
+      background: var(--gray-50);
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      padding: 10px;
+      max-height: 240px;
+      overflow: auto;
+    }
+
+    .audio-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .audio-item {
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      padding: 10px;
+      background: white;
+    }
+
+    .audio-item-name {
+      font-size: 12px;
+      color: var(--gray-500);
+      margin-bottom: 6px;
+      word-break: break-all;
+    }
+
+    .audio-item audio { width: 100%; }
   </style>
 </head>
 <body>
@@ -301,7 +404,7 @@
         <label>Telefonnummer</label>
         <input type="tel" id="manual-phone" placeholder="+491234567890" />
       </div>
-      <button class="btn btn-primary" id="btn-manual-call" onclick="startManualCall()">
+      <button class="btn btn-primary" id="btn-manual-call">
         <span>📞</span> Jetzt anrufen
       </button>
     </div>
@@ -335,12 +438,32 @@
     </div>
   </div>
 
+  <div class="card card-wide">
+    <div class="card-header">
+      <span class="icon">🕘</span>
+      Letzte Anrufe
+      <button class="btn-refresh" onclick="loadCallHistory()">↻ Aktualisieren</button>
+    </div>
+    <div class="history-layout">
+      <div id="history-list" class="history-list">
+        <div class="loading"><div class="spinner"></div><br>Anrufhistorie wird geladen…</div>
+      </div>
+      <div id="history-detail" class="history-detail">
+        <div class="empty">Wähle einen Anruf aus der Liste aus.</div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <div id="toast-container"></div>
 
 <script>
   const API = '';  // same origin
+  let activeCall = null;
+  let statusPollTimer = null;
+  let historyItems = [];
+  let selectedSessionId = null;
 
   // --- Status check ---
   async function checkStatus() {
@@ -370,6 +493,98 @@
     }
   }
 
+  async function loadCallHistory() {
+    const listEl = document.getElementById('history-list');
+    listEl.innerHTML = '<div class="loading"><div class="spinner"></div><br>Anrufhistorie wird geladen…</div>';
+    try {
+      const r = await fetch(API + '/twilio/call-history?limit=5');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      historyItems = data.items || [];
+      renderHistoryList(historyItems);
+      if (historyItems.length) {
+        const nextId = selectedSessionId || historyItems[0].session_id;
+        await openHistoryDetail(nextId);
+      } else {
+        document.getElementById('history-detail').innerHTML = '<div class="empty">Noch keine Anrufe vorhanden.</div>';
+      }
+    } catch (e) {
+      listEl.innerHTML = '<div class="empty">❌ Fehler beim Laden: ' + esc(e.message) + '</div>';
+    }
+  }
+
+  function renderHistoryList(items) {
+    const listEl = document.getElementById('history-list');
+    if (!items.length) {
+      listEl.innerHTML = '<div class="empty">Noch keine Anrufe vorhanden.</div>';
+      return;
+    }
+
+    listEl.innerHTML = items.map(item => {
+      const partner = item.partner || 'Unbekannt';
+      const status = item.status || 'unbekannt';
+      const date = item.date_time || item.session_id;
+      const duration = item.duration || '-';
+      const preview = item.summary_preview || 'Keine Zusammenfassung';
+      const activeClass = item.session_id === selectedSessionId ? 'active' : '';
+      return `
+        <div class="history-item ${activeClass}" onclick="openHistoryDetail('${item.session_id}')">
+          <div class="history-title">${esc(partner)}</div>
+          <div class="history-meta">${esc(date)} · ${esc(duration)} · ${esc(status)}</div>
+          <div class="history-preview">${esc(preview)}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function openHistoryDetail(sessionId) {
+    selectedSessionId = sessionId;
+    renderHistoryList(historyItems);
+
+    const detailEl = document.getElementById('history-detail');
+    detailEl.innerHTML = '<div class="loading"><div class="spinner"></div><br>Details werden geladen…</div>';
+
+    try {
+      const r = await fetch(`${API}/twilio/call-history/${encodeURIComponent(sessionId)}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const item = await r.json();
+      renderHistoryDetail(item);
+    } catch (e) {
+      detailEl.innerHTML = '<div class="empty">❌ Fehler beim Laden: ' + esc(e.message) + '</div>';
+    }
+  }
+
+  function renderHistoryDetail(item) {
+    const detailEl = document.getElementById('history-detail');
+    const audioFiles = item.audio_files || [];
+    const audioHtml = audioFiles.length
+      ? `<div class="audio-list">${audioFiles.map(a => `
+          <div class="audio-item">
+            <div class="audio-item-name">${esc(a.name)}</div>
+            <audio controls preload="none" src="${esc(a.url)}"></audio>
+          </div>`).join('')}</div>`
+      : '<div class="empty" style="padding:20px">Keine Audio-Dateien gefunden.</div>';
+
+    detailEl.innerHTML = `
+      <div class="detail-grid">
+        <div class="detail-pill"><b>Partner</b>${esc(item.partner || 'Unbekannt')}</div>
+        <div class="detail-pill"><b>Status</b>${esc(item.status || 'unbekannt')}</div>
+        <div class="detail-pill"><b>Vereinbarter Termin</b>${esc(item.appointment_date || '-')}</div>
+        <div class="detail-pill"><b>Datum</b>${esc(item.date_time || '-')}</div>
+        <div class="detail-pill"><b>Dauer</b>${esc(item.duration || '-')}</div>
+      </div>
+
+      <div class="detail-section-title">Zusammenfassung</div>
+      <div class="detail-summary">${esc(item.summary || 'Keine Zusammenfassung vorhanden.')}</div>
+
+      <div class="detail-section-title">Transkript</div>
+      <div class="detail-transcript">${esc(item.transcript || 'Kein Transkript vorhanden.')}</div>
+
+      <div class="detail-section-title">Audio-Dateien</div>
+      ${audioHtml}
+    `;
+  }
+
   function renderContacts(contacts) {
     const state = document.getElementById('contacts-state');
     const table = document.getElementById('contacts-table');
@@ -390,7 +605,7 @@
         <td>${c.company ? '<span class="badge badge-blue">' + esc(c.company) + '</span>' : '<span style="color:var(--gray-300)">—</span>'}</td>
         <td>
           ${c.phone
-            ? `<button class="btn btn-call" onclick="callContact(${c.contact_id}, '${esc(c.name)}')">📞 Anrufen</button>`
+            ? `<button id="btn-contact-${c.contact_id}" data-name="${esc(c.name || '')}" class="btn btn-call" onclick="handleContactButton(${c.contact_id})">📞 Anrufen</button>`
             : '<span style="font-size:12px;color:var(--gray-300)">Kein Telefon</span>'
           }
         </td>
@@ -399,9 +614,109 @@
 
     state.style.display = 'none';
     table.style.display = 'table';
+    refreshButtonStates();
   }
 
-  // --- Call from contacts ---
+  function isCallActiveStatus(status) {
+    return ['queued', 'ringing', 'in-progress'].includes(String(status || '').toLowerCase());
+  }
+
+  function setManualButtonAsHangup() {
+    const btn = document.getElementById('btn-manual-call');
+    btn.classList.remove('btn-primary');
+    btn.style.background = 'var(--danger)';
+    btn.innerHTML = '<span>📴</span> Auflegen';
+  }
+
+  function setManualButtonAsCall() {
+    const btn = document.getElementById('btn-manual-call');
+    btn.classList.add('btn-primary');
+    btn.style.background = '';
+    btn.innerHTML = '<span>📞</span> Jetzt anrufen';
+    btn.disabled = false;
+  }
+
+  function setContactButtonAsHangup(contactId) {
+    const btn = document.getElementById(`btn-contact-${contactId}`);
+    if (!btn) return;
+    btn.style.background = 'var(--danger)';
+    btn.innerHTML = '📴 Auflegen';
+  }
+
+  function setContactButtonAsCall(contactId) {
+    const btn = document.getElementById(`btn-contact-${contactId}`);
+    if (!btn) return;
+    btn.style.background = '';
+    btn.innerHTML = '📞 Anrufen';
+  }
+
+  function refreshButtonStates() {
+    setManualButtonAsCall();
+    if (!activeCall) return;
+
+    if (activeCall.source === 'manual') {
+      setManualButtonAsHangup();
+      return;
+    }
+
+    if (activeCall.source === 'contact' && activeCall.contactId) {
+      setContactButtonAsHangup(activeCall.contactId);
+    }
+  }
+
+  function startStatusPolling() {
+    stopStatusPolling();
+    statusPollTimer = setInterval(checkActiveCallStatus, 2500);
+  }
+
+  function stopStatusPolling() {
+    if (!statusPollTimer) return;
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
+
+  async function checkActiveCallStatus() {
+    if (!activeCall?.sid) return;
+    try {
+      const r = await fetch(`${API}/twilio/call-status/${encodeURIComponent(activeCall.sid)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!isCallActiveStatus(data.status)) {
+        const target = activeCall.target;
+        clearActiveCall();
+        showToast('Anruf beendet', `${target} (${data.status || 'beendet'})`, 'info');
+      }
+    } catch {
+      // Ignorieren, Polling läuft weiter
+    }
+  }
+
+  function setActiveCall(callSid, source, target, contactId = null) {
+    activeCall = { sid: callSid, source, target, contactId };
+    refreshButtonStates();
+    startStatusPolling();
+  }
+
+  function clearActiveCall() {
+    activeCall = null;
+    stopStatusPolling();
+    refreshButtonStates();
+  }
+
+  async function handleContactButton(contactId) {
+    const btn = document.getElementById(`btn-contact-${contactId}`);
+    const name = btn?.dataset?.name || `Kontakt ${contactId}`;
+    if (activeCall && activeCall.source === 'contact' && activeCall.contactId === contactId) {
+      await hangupActiveCall();
+      return;
+    }
+    if (activeCall) {
+      showToast('Anruf aktiv', 'Bitte zuerst den aktuellen Anruf auflegen.', 'error');
+      return;
+    }
+    await callContact(contactId, name);
+  }
+
   async function callContact(contactId, name) {
     showToast('Verbinde…', `Anruf für ${name} wird gestartet`, 'info');
     try {
@@ -413,12 +728,25 @@
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
       showToast('✅ Anruf gestartet', `${name} wird angerufen (${data.to || ''})`, 'success');
+      setActiveCall(data.call_sid, 'contact', name, contactId);
     } catch(e) {
       showToast('❌ Fehler', e.message, 'error');
     }
   }
 
   // --- Manual call ---
+  async function handleManualButton() {
+    if (activeCall && activeCall.source === 'manual') {
+      await hangupActiveCall();
+      return;
+    }
+    if (activeCall) {
+      showToast('Anruf aktiv', 'Bitte zuerst den aktuellen Anruf auflegen.', 'error');
+      return;
+    }
+    await startManualCall();
+  }
+
   async function startManualCall() {
     const name = document.getElementById('manual-name').value.trim();
     const phone = document.getElementById('manual-phone').value.trim();
@@ -437,13 +765,34 @@
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
       showToast('✅ Anruf gestartet', `${name || phone} wird angerufen`, 'success');
+      setActiveCall(data.call_sid, 'manual', name || phone);
       document.getElementById('manual-name').value = '';
       document.getElementById('manual-phone').value = '';
     } catch(e) {
       showToast('❌ Fehler', e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<span>📞</span> Jetzt anrufen';
+      if (!activeCall) {
+        btn.disabled = false;
+        setManualButtonAsCall();
+      }
+    }
+  }
+
+  async function hangupActiveCall() {
+    if (!activeCall?.sid) return;
+    try {
+      const r = await fetch(API + '/twilio/hangup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ call_sid: activeCall.sid })
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+      const target = activeCall.target;
+      clearActiveCall();
+      showToast('Anruf beendet', `${target} wurde aufgelegt`, 'success');
+    } catch (e) {
+      showToast('❌ Auflegen fehlgeschlagen', e.message, 'error');
     }
   }
 
@@ -462,8 +811,10 @@
   }
 
   // Init
+  document.getElementById('btn-manual-call').onclick = handleManualButton;
   checkStatus();
   loadContacts();
+  loadCallHistory();
   setInterval(checkStatus, 30000);
 </script>
 </body>
