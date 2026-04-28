@@ -51,7 +51,7 @@ def _is_strict_farewell(text: str) -> bool:
         return False
 
     tokens = re.findall(r"\w+", normalized)
-    if len(tokens) > 10:
+    if len(tokens) > 25:
         return False
 
     for pattern in _FAREWELL_PATTERNS:

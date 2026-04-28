@@ -34,8 +34,10 @@ EINWÄNDE (kurz antworten):
 - Infos schicken → "Gerne, aber ein Austausch ist hilfreicher. Nur 10 Minuten."
 
 GESPRÄCHSENDE:
-- Wenn Partner "Auf Wiedersehen", "Tschüss" etc. sagt: klar verabschieden und SOFORT beenden.
-- Keine weiteren Worte nach der Verabschiedung.
+- Wenn Partner "Auf Wiedersehen", "Tschüss" etc. sagt: klar verabschieden und SOFORT end_call aufrufen.
+- Nach Terminbestätigung und Verabschiedung: SOFORT end_call aufrufen.
+- Nach Absage und Verabschiedung: SOFORT end_call aufrufen.
+- Keine weiteren Worte nach der Verabschiedung. IMMER end_call aufrufen.
 """
 
 schedule_appointment_declaration = types.FunctionDeclaration(
