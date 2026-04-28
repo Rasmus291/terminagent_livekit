@@ -33,6 +33,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -96,6 +97,11 @@ MAILBOX_MESSAGE = os.getenv(
 PUBLIC_URL = None
 
 app = FastAPI()
+
+# Frontend UI
+_frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
+if os.path.isdir(_frontend_dir):
+    app.mount("/ui", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
 
 
 @app.post("/twilio/incoming")
@@ -458,6 +464,7 @@ async def initiate_call(request: Request):
     body = await request.json()
     contact_id = body.get("contact_id")
     to_number = body.get("to")
+    manual_name = (body.get("name") or "").strip()
     contact = None
 
     if contact_id:
@@ -502,8 +509,8 @@ async def initiate_call(request: Request):
     ws_url = f"{ws_base}/twilio/ws"
 
     # Kontaktdaten als Stream-Parameter übergeben
-    contact_name = contact.get("name", "") if contact else ""
-    contact_first_name = contact.get("first_name", "") if contact else ""
+    contact_name = contact.get("name", "") if contact else manual_name
+    contact_first_name = contact.get("first_name", "") if contact else (manual_name.split()[0] if manual_name else "")
     contact_company = contact.get("company", "") if contact else ""
     contact_notes = contact.get("notes", "") if contact else ""
     contact_id_str = str(contact.get("contact_id", "")) if contact else ""
