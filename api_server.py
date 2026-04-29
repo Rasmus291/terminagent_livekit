@@ -136,10 +136,56 @@ async def start_call(req: CallRequest):
                 "status": "calling",
                 "to": phone,
                 "room": room_name,
+                "call_sid": room_name,  # Room-Name als Call-ID für Status-Polling
                 "sip_call_id": participant.sip_call_id,
             }
     except Exception as e:
         logger.error("Anruf fehlgeschlagen: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/twilio/call-status/{call_sid}")
+async def get_call_status(call_sid: str):
+    """Prüft ob ein Anruf (Room) noch aktiv ist."""
+    safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "", call_sid)
+    try:
+        from livekit.api import LiveKitAPI
+        async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+            rooms = await lk.room.list_rooms()
+            for room in rooms:
+                if room.name == safe_sid:
+                    if room.num_participants > 0:
+                        return {"status": "in-progress", "participants": room.num_participants}
+                    return {"status": "completed"}
+            return {"status": "completed"}
+    except Exception as e:
+        logger.warning("Call-Status-Abfrage fehlgeschlagen: %s", e)
+        return {"status": "unknown"}
+
+
+@app.post("/twilio/hangup")
+async def hangup_call(req: dict):
+    """Beendet einen aktiven Anruf."""
+    call_sid = req.get("call_sid", "")
+    if not call_sid:
+        raise HTTPException(status_code=400, detail="call_sid fehlt")
+    safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "", call_sid)
+    try:
+        from livekit.api import LiveKitAPI, RoomParticipantIdentity
+        async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+            rooms = await lk.room.list_rooms()
+            for room in rooms:
+                if room.name == safe_sid:
+                    # Alle Participants entfernen
+                    participants = await lk.room.list_participants(safe_sid)
+                    for p in participants:
+                        await lk.room.remove_participant(
+                            RoomParticipantIdentity(room=safe_sid, identity=p.identity)
+                        )
+                    return {"status": "hung_up", "room": safe_sid}
+            return {"status": "not_found"}
+    except Exception as e:
+        logger.error("Hangup fehlgeschlagen: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

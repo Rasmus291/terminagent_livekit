@@ -8,7 +8,7 @@ import time
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, function_tool
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext
 from livekit.plugins import google, silero
 from google.genai import types as genai_types
 
@@ -22,13 +22,10 @@ from session_manager import (
 )
 from tool_handler import (
     call_ended,
-    check_availability,
     crm_data_saved,
-    end_call,
     mark_assistant_farewell,
     mark_partner_farewell,
     reset_call_state,
-    schedule_appointment,
 )
 
 load_dotenv()
@@ -38,27 +35,6 @@ logger = logging.getLogger(__name__)
 class LaVitaLiveKitAgent(Agent):
     def __init__(self, instructions: str):
         super().__init__(instructions=instructions)
-
-    @function_tool()
-    async def check_availability(self, context: RunContext, days_ahead: int = 5) -> dict:
-        """Prüft verfügbare Terminslots in Calendly für die nächsten Tage (1-7)."""
-        return await check_availability(days_ahead=days_ahead)
-
-    @function_tool()
-    async def schedule_appointment(self, context: RunContext, partner_name: str,
-                                    status: str, appointment_date: str = "",
-                                    contact_method: str = "", notes: str = "") -> dict:
-        """Speichert Termindaten und versendet eine Benachrichtigung."""
-        context.disallow_interruptions()
-        return await schedule_appointment(
-            partner_name=partner_name, status=status,
-            appointment_date=appointment_date, contact_method=contact_method, notes=notes,
-        )
-
-    @function_tool()
-    async def end_call(self, context: RunContext, reason: str) -> dict:
-        """Beendet das Gespräch aktiv nach der finalen Verabschiedung."""
-        return await end_call(reason=reason)
 
 
 server = AgentServer()
@@ -108,7 +84,7 @@ async def lavita_agent(ctx: JobContext):
             language="de-DE",
             realtime_input_config=genai_types.RealtimeInputConfig(
                 automaticActivityDetection=genai_types.AutomaticActivityDetection(
-                    startOfSpeechSensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
+                    startOfSpeechSensitivity=genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
                     endOfSpeechSensitivity=genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
                     silenceDurationMs=500, prefixPaddingMs=200,
                 ),
@@ -125,6 +101,7 @@ async def lavita_agent(ctx: JobContext):
         min_interruption_duration=0.8,
         min_interruption_words=2,
         false_interruption_timeout=1.0,
+        aec_warmup_duration=0.0,  # Kein AEC Warmup — Agent soll sofort sprechen
     )
 
     # Event-Handler registrieren
@@ -158,22 +135,30 @@ async def lavita_agent(ctx: JobContext):
     await recorder.notify_call_start()
 
     job_id = str(getattr(getattr(ctx, "job", None), "id", ""))
+    partner_name = ""
     if not job_id.startswith("mock-job"):
         timeout = float(os.getenv("LIVEKIT_WAIT_PARTICIPANT_SECS", "45"))
         try:
-            await asyncio.wait_for(ctx.wait_for_participant(), timeout=timeout)
+            participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=timeout)
+            # Name aus "Partner (Nachname)" extrahieren
+            pname = getattr(participant, "name", "") or ""
+            if pname.startswith("Partner (") and pname.endswith(")"):
+                partner_name = pname[9:-1]
+            elif pname:
+                partner_name = pname
         except asyncio.TimeoutError:
             logger.warning("Kein Teilnehmer innerhalb von %.0fs.", timeout)
 
     async def run():
         await session.start(room=ctx.room, agent=agent)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
+        name_hint = f" Der Partner heißt {partner_name}. Begrüße ihn mit seinem Namen." if partner_name else ""
+        trigger = f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen.{name_hint} Begrüße ihn jetzt."
+        logger.info("Sende Gesprächseröffnung: %s", trigger[:80])
         try:
-            session.generate_reply(
-                user_input=f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. Begrüße ihn SOFORT.",
-            )
+            session.generate_reply(user_input=trigger)
         except Exception as e:
-            logger.warning("Gesprächseröffnung fehlgeschlagen: %s", e)
+            logger.error("Gesprächseröffnung fehlgeschlagen: %s", e)
 
     await asyncio.gather(run(), end_call_monitor(ctx, _finalize, session))
 
