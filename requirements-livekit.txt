@@ -1,4 +1,0 @@
-# LiveKit Agents + Gemini Live
-livekit-agents[silero,google]~=1.5
-python-dotenv
-httpx
