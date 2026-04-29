@@ -303,9 +303,9 @@ def send_call_result_summary(
     analysis = analysis or {}
     transcript = transcript or []
 
-    partner_name = (crm_data.get("partner_name") or "Unbekannt").strip()
+    partner_name = (crm_data.get("partner_name") or analysis.get("partner_name") or "Unbekannt").strip()
     status = (crm_data.get("status") or analysis.get("ergebnis") or "unbekannt").strip()
-    appointment_date = (crm_data.get("appointment_date") or "-").strip() or "-"
+    appointment_date = (crm_data.get("appointment_date") or analysis.get("termin") or "-").strip() or "-"
     notes = (crm_data.get("notes") or "-").strip() or "-"
     calendly_link = crm_data.get("calendly_link")
     sentiment_gesamt = str(analysis.get("sentiment_gesamt") or "unbekannt")
