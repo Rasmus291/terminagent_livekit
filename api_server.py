@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
-SIP_TRUNK_ID = os.getenv("LIVEKIT_SIP_TRUNK_ID", "")
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "lavita-agent")
 
 app = FastAPI(title="LaVita Terminagent API")
@@ -51,7 +50,7 @@ async def _broadcast_monitor(data: dict):
             await ws.send_text(msg)
         except Exception:
             dead.add(ws)
-    _monitor_clients -= dead
+    _monitor_clients.difference_update(dead)
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,6 +64,38 @@ class CallRequest(BaseModel):
     to: str | None = None
     name: str | None = None
     contact_id: str | None = None
+    sip_trunk_id: str | None = None
+
+
+async def _resolve_sip_trunk_id(req: CallRequest) -> str:
+    """Ermittelt SIP-Trunk-ID aus Request, Env oder LiveKit Auto-Discovery."""
+    # 1) explizit im Request
+    if req.sip_trunk_id:
+        return req.sip_trunk_id
+
+    # 2) bekannte Env-Varianten
+    for key in ("LIVEKIT_SIP_TRUNK_ID", "LIVEKIT_OUTBOUND_TRUNK_ID", "SIP_TRUNK_ID"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+
+    # 3) Auto-Discovery: wenn genau 1 Outbound-Trunk vorhanden ist, verwende ihn
+    try:
+        from livekit.api import LiveKitAPI, ListSIPOutboundTrunkRequest
+
+        async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+            resp = await lk.sip.list_outbound_trunk(ListSIPOutboundTrunkRequest())
+            trunks = list(getattr(resp, "items", []) or [])
+            if len(trunks) == 1:
+                trunk = trunks[0]
+                trunk_id = (getattr(trunk, "sip_trunk_id", "") or "").strip()
+                if trunk_id:
+                    logger.info("Auto-Discovery: verwende einzigen SIP-Trunk %s", trunk_id)
+                    return trunk_id
+    except Exception as e:
+        logger.warning("SIP-Trunk Auto-Discovery fehlgeschlagen: %s", e)
+
+    return ""
 
 
 @app.get("/twilio/contacts")
@@ -103,8 +134,12 @@ async def start_call(req: CallRequest):
     if not phone:
         raise HTTPException(status_code=400, detail="Telefonnummer fehlt")
 
-    if not SIP_TRUNK_ID:
-        raise HTTPException(status_code=500, detail="LIVEKIT_SIP_TRUNK_ID nicht konfiguriert")
+    sip_trunk_id = await _resolve_sip_trunk_id(req)
+    if not sip_trunk_id:
+        raise HTTPException(
+            status_code=500,
+            detail="SIP-Trunk nicht konfiguriert. Setze LIVEKIT_SIP_TRUNK_ID oder übergib sip_trunk_id im Request.",
+        )
 
     try:
         from livekit.api import LiveKitAPI, CreateSIPParticipantRequest, CreateAgentDispatchRequest
@@ -120,7 +155,7 @@ async def start_call(req: CallRequest):
             # SIP-Anruf starten
             participant = await lk.sip.create_sip_participant(
                 CreateSIPParticipantRequest(
-                    sip_trunk_id=SIP_TRUNK_ID,
+                    sip_trunk_id=sip_trunk_id,
                     sip_call_to=phone,
                     room_name=room_name,
                     participant_identity=f"phone-{phone}",
