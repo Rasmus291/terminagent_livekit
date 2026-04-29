@@ -1,206 +1,183 @@
-import os
+"""LiveKit Agent Entry Point — Orchestriert Session-Lifecycle."""
+
 import asyncio
-import logging
 import datetime
+import logging
+import os
 import time
-import re
 
-from google import genai
-from google.genai import types
+from dotenv import load_dotenv
+from livekit import agents
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, function_tool
+from livekit.plugins import google, silero
+from google.genai import types as genai_types
 
-from config import GEMINI_API_KEY, MODEL_ID, LIVE_CONFIG
-from audio_handler import AudioStreamer
-import email_service
-from reporting import save_session_report, generate_analysis
-from response_handler import ResponseHandler
-
-# Logging Setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-
-_FAREWELL_PATTERNS = (
-    r"\btsch(u|ü)ss\b",
-    r"\bauf wiedersehen\b",
-    r"\bauf wiederh(ö|oe)ren\b",
-    r"\bbis zum termin\b",
-    r"\bbis dann\b",
-    r"\bbis bald\b",
-    r"\bbis sp(ä|ae)ter\b",
-    r"\bsch(ö|oe)nen tag\b",
-    r"\bsch(ö|oe)nen tag noch\b",
-    r"\beinen sch(ö|oe)nen tag\b",
-    r"\balles gute\b",
-    r"\bmach'?s gut\b",
-    r"\bciao\b",
+from audio_recorder import RoomAudioRecorder
+from config import GEMINI_API_KEY, MODEL_ID, SYSTEM_INSTRUCTION
+from session_manager import (
+    _START_TRIGGER_PREFIX,
+    create_conversation_handler,
+    end_call_monitor,
+    finalize_session,
+)
+from tool_handler import (
+    call_ended,
+    check_availability,
+    crm_data_saved,
+    end_call,
+    mark_assistant_farewell,
+    mark_partner_farewell,
+    reset_call_state,
+    schedule_appointment,
 )
 
-def _is_farewell_text(text: str) -> bool:
-    if not text:
-        return False
-    normalized = text.lower()
-    return any(re.search(pattern, normalized) for pattern in _FAREWELL_PATTERNS)
+load_dotenv()
+logger = logging.getLogger(__name__)
 
 
-def _extract_role_text(entry: str, role: str):
-    match = re.match(r"^\*\*\[[^\]]+\]\s+(User|Agent):\*\*\s*(.+)$", entry.strip())
-    if not match:
-        return None
-    found_role, text = match.group(1), match.group(2)
-    if found_role != role:
-        return None
-    return text.strip()
+class LaVitaLiveKitAgent(Agent):
+    def __init__(self, instructions: str):
+        super().__init__(instructions=instructions)
+
+    @function_tool()
+    async def check_availability(self, context: RunContext, days_ahead: int = 5) -> dict:
+        """Prüft verfügbare Terminslots in Calendly für die nächsten Tage (1-7)."""
+        return await check_availability(days_ahead=days_ahead)
+
+    @function_tool()
+    async def schedule_appointment(self, context: RunContext, partner_name: str,
+                                    status: str, appointment_date: str = "",
+                                    contact_method: str = "", notes: str = "") -> dict:
+        """Speichert Termindaten und versendet eine Benachrichtigung."""
+        context.disallow_interruptions()
+        return await schedule_appointment(
+            partner_name=partner_name, status=status,
+            appointment_date=appointment_date, contact_method=contact_method, notes=notes,
+        )
+
+    @function_tool()
+    async def end_call(self, context: RunContext, reason: str) -> dict:
+        """Beendet das Gespräch aktiv nach der finalen Verabschiedung."""
+        return await end_call(reason=reason)
 
 
-def _latest_role_text(transcript: list[str], role: str) -> str | None:
-    parts: list[str] = []
-    for entry in reversed(transcript):
-        match = re.match(r"^\*\*\[[^\]]+\]\s+(User|Agent):\*\*\s*(.+)$", entry.strip())
-        if not match:
-            continue
-
-        found_role, text = match.group(1), match.group(2).strip()
-        if found_role == role:
-            if text:
-                parts.append(text)
-            continue
-
-        if parts:
-            break
-
-    if not parts:
-        return None
-
-    return " ".join(reversed(parts)).strip()
+server = AgentServer()
 
 
-def _mutual_farewell_detected(transcript: list[str]) -> bool:
-    """Beendet nur, wenn die jeweils LETZTE User- und Agent-Aussage klar Verabschiedungen sind."""
-    last_user = _latest_role_text(transcript, "User")
-    last_agent = _latest_role_text(transcript, "Agent")
-    if not last_user or not last_agent:
-        return False
-    return _is_farewell_text(last_user) and _is_farewell_text(last_agent)
-
-
-async def main():
+@server.rtc_session(agent_name=os.getenv("LIVEKIT_AGENT_NAME", "lavita-agent"))
+async def lavita_agent(ctx: JobContext):
     if not GEMINI_API_KEY:
-        logger.error("API-Key fehlt! Bitte GEMINI_API_KEY in der .env setzen.")
+        logger.error("API-Key fehlt!")
         return
 
     os.makedirs("sessions", exist_ok=True)
+    reset_call_state()
 
-    # Session-Daten
-    session_transcript = []
-    crm_data_saved = {}
-    latency_measurements = []
-    session_start_time = datetime.datetime.now()
-    session_start_perf = time.perf_counter()
+    transcript: list[str] = []
+    latencies: list[float] = []
+    start_time = datetime.datetime.now()
+    start_perf = time.perf_counter()
+    ts = start_time.strftime("%Y%m%d_%H%M%S")
+    started_event = asyncio.Event()
+    recorder = RoomAudioRecorder()
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    audio_streamer = AudioStreamer()
-    handler = ResponseHandler(audio_streamer, session_transcript, crm_data_saved, latency_measurements)
-
-    # Audio-Hardware parallel zum API-Connect starten
-    audio_streamer.start()
-
+    # Calendly vorab cachen
+    cached = ""
     try:
-        logger.info("Verbinde mit Gemini Live API...")
-        async with client.aio.live.connect(model=MODEL_ID, config=LIVE_CONFIG) as session:
-            logger.info("Session gestartet. Du kannst jetzt sprechen.")
+        import calendly_service
+        slots = await calendly_service.format_available_slots(days_ahead=5)
+        if slots and "Keine freien" not in slots:
+            cached = f"\n\nVERFÜGBARE TERMINE (vorab geladen):\n{slots}"
+    except Exception:
+        pass
 
-            logger.info("Sende sofortigen Begrüßungs-Trigger...")
-            await session.send_client_content(
-                turns=types.Content(role="user", parts=[types.Part.from_text(
-                    text="Der Partner hat gerade abgenommen. Begrüße ihn jetzt und starte das Gespräch."
-                )]),
-                turn_complete=True
-            )
+    instructions = (
+        f"{SYSTEM_INSTRUCTION}{cached}\n\n"
+        "AKTUELLER KONTEXT: Der Partner ist bereits in der Leitung. "
+        "Beginne jetzt proaktiv mit Begrüßung und kurzem Anliegen. "
+        "Mache noch keinen konkreten Terminslot in der ersten Aussage."
+    )
 
-            async def send_audio():
-                async for chunk in audio_streamer.get_input_stream():
-                    await session.send_realtime_input(audio=types.Blob(
-                        mime_type="audio/pcm;rate=16000",
-                        data=chunk
-                    ))
-                    handler.last_audio_sent_time = time.perf_counter()
+    agent = LaVitaLiveKitAgent(instructions=instructions)
+    session = AgentSession(
+        llm=google.realtime.RealtimeModel(
+            model=MODEL_ID,
+            voice=os.getenv("LIVEKIT_GEMINI_VOICE", "Kore"),
+            api_key=GEMINI_API_KEY,
+            instructions=instructions,
+            language="de-DE",
+            realtime_input_config=genai_types.RealtimeInputConfig(
+                automaticActivityDetection=genai_types.AutomaticActivityDetection(
+                    startOfSpeechSensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
+                    endOfSpeechSensitivity=genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    silenceDurationMs=500, prefixPaddingMs=200,
+                ),
+            ),
+        ),
+        vad=silero.VAD.load(
+            min_silence_duration=0.4, min_speech_duration=0.25,
+            prefix_padding_duration=0.2, activation_threshold=0.7,
+        ),
+        turn_handling={
+            "turn_detection": "realtime_llm",
+            "endpointing": {"mode": "dynamic", "min_delay": 0.2, "max_delay": 0.6},
+        },
+        min_interruption_duration=0.8,
+        min_interruption_words=2,
+        false_interruption_timeout=1.0,
+    )
 
-            async def receive_responses():
-                appointment_done = False
-                while True:
-                    if appointment_done:
-                        # Nach Terminvereinbarung: Noch kurz auf Rückfragen warten
-                        try:
-                            await asyncio.wait_for(handler.process_turn(session), timeout=15.0)
-                        except asyncio.TimeoutError:
-                            logger.info("Keine weiteren Rückfragen. Beende Gespräch.")
-                            raise asyncio.CancelledError("Call completed")
-                    else:
-                        tool_triggered = await handler.process_turn(session)
-                        if tool_triggered:
-                            appointment_done = True
+    # Event-Handler registrieren
+    handler = create_conversation_handler(transcript, latencies, started_event, {
+        "mark_partner_farewell": mark_partner_farewell,
+        "mark_assistant_farewell": mark_assistant_farewell,
+    })
+    session.on("conversation_item_added", handler)
 
-                    # Nur zwischen vollständigen Turns prüfen, nie mitten im Satz
-                    if _mutual_farewell_detected(session_transcript):
-                        logger.info("Beidseitige Verabschiedung erkannt. Beende Gespräch nach Turn-Abschluss.")
-                        raise asyncio.CancelledError("Mutual farewell detected")
+    def on_close(event):
+        if not call_ended.is_set():
+            call_ended.set()
+    session.on("close", on_close)
 
-            await asyncio.gather(send_audio(), receive_responses())
+    _done = False
 
-    except asyncio.CancelledError:
-        logger.info("Session beendet.")
-    except Exception as e:
-        logger.error(f"Fehler in der Live-Session: {e}", exc_info=True)
-    finally:
-        audio_streamer.stop()
+    async def _finalize(reason=""):
+        nonlocal _done
+        if _done:
+            return
+        _done = True
+        await finalize_session(
+            transcript, crm_data_saved or None, recorder,
+            start_time, start_perf, ts, latencies,
+        )
 
-        # Gemeinsamer Timestamp für Audio + Report
-        session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    ctx.add_shutdown_callback(_finalize)
 
-        # Audio-Aufzeichnung speichern
-        logger.info("Speichere Audio-Aufzeichnung...")
-        audio_streamer.save_recording("sessions", timestamp=session_timestamp)
+    await ctx.connect()
+    recorder.start(ctx.room)
+    await recorder.notify_call_start()
 
-        # Unvollständigen Agent-Turn noch sichern
-        handler.save_pending_text()
-
-        call_duration = time.perf_counter() - session_start_perf
-        call_start_str = session_start_time.strftime('%Y-%m-%d %H:%M:%S')
-
-        logger.info("Generiere Analyse + Sentiment...")
+    job_id = str(getattr(getattr(ctx, "job", None), "id", ""))
+    if not job_id.startswith("mock-job"):
+        timeout = float(os.getenv("LIVEKIT_WAIT_PARTICIPANT_SECS", "45"))
         try:
-            analysis = await generate_analysis(client, session_transcript)
-        except Exception as e:
-            logger.error("Analyse fehlgeschlagen: %s", e)
-            analysis = {"zusammenfassung": f"*Analyse-Fehler: {e}*", "sentiment_gesamt": "unbekannt", "ergebnis": "unbekannt"}
+            await asyncio.wait_for(ctx.wait_for_participant(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Kein Teilnehmer innerhalb von %.0fs.", timeout)
 
-        logger.info("Speichere Session Report...")
+    async def run():
+        await session.start(room=ctx.room, agent=agent)
+        await asyncio.sleep(0.1)
         try:
-            save_session_report(
-                session_transcript,
-                crm_data=crm_data_saved or None,
-                latency_data=latency_measurements,
-                call_duration=call_duration,
-                call_start_time=call_start_str,
-                analysis=analysis,
-                timestamp=session_timestamp
-            )
-        except Exception as e:
-            logger.error("Session Report konnte nicht gespeichert werden: %s", e)
-
-        try:
-            email_service.send_call_result_summary(
-                call_start_time=call_start_str,
-                call_duration_seconds=call_duration,
-                crm_data=crm_data_saved or None,
-                analysis=analysis,
-                transcript=session_transcript,
+            session.generate_reply(
+                user_input=f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. Begrüße ihn SOFORT.",
             )
         except Exception as e:
-            logger.warning("Ergebnis-Mail Versand fehlgeschlagen: %s", e)
+            logger.warning("Gesprächseröffnung fehlgeschlagen: %s", e)
+
+    await asyncio.gather(run(), end_call_monitor(ctx, _finalize, session))
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Beendet durch Benutzer (Ctrl+C).")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    agents.cli.run_app(server)

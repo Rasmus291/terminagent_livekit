@@ -496,12 +496,12 @@
         </div>
         <div class="monitor-panel">
           <h4>Partner</h4>
-          <div id="partner-monitor-status" class="monitor-status monitor-state-idle">Warte auf Audio…</div>
+          <div id="partner-monitor-status" class="monitor-status monitor-state-idle">—</div>
           <div class="monitor-meta">Live-Ausgabe der Sprache des angerufenen Partners.</div>
         </div>
         <div class="monitor-panel">
           <h4>Agent</h4>
-          <div id="agent-monitor-status" class="monitor-status monitor-state-idle">Warte auf Audio…</div>
+          <div id="agent-monitor-status" class="monitor-status monitor-state-idle">—</div>
           <div class="monitor-meta">Live-Ausgabe der Stimme von Anna / Agent.</div>
         </div>
       </div>
@@ -628,9 +628,10 @@
     document.getElementById('monitor-call-meta').textContent = text;
   }
 
-  function resetMonitorTrackStatus() {
-    updateMonitorTrackStatus('partner', 'Warte auf Audio…', false);
-    updateMonitorTrackStatus('agent', 'Warte auf Audio…', false);
+  function resetMonitorTrackStatus(active = false) {
+    const text = active ? 'Warte auf Audio…' : '—';
+    updateMonitorTrackStatus('partner', text, false);
+    updateMonitorTrackStatus('agent', text, false);
   }
 
   async function toggleLiveMonitor() {
@@ -659,7 +660,7 @@
       monitorEnabled = true;
       btn.textContent = '🛑 Live-Mithören stoppen';
       updateMonitorConnectionStatus('Verbinde…', false);
-      resetMonitorTrackStatus();
+      resetMonitorTrackStatus(true);
 
       monitorSocket.onopen = () => {
         updateMonitorConnectionStatus('Live-Monitor verbunden', true);
@@ -733,24 +734,40 @@
 
     const binary = atob(base64Pcm);
     const sampleCount = Math.floor(binary.length / 2);
-    const audioBuffer = monitorAudioContext.createBuffer(1, sampleCount, sampleRate || 16000);
+    if (sampleCount === 0) return;
+
+    const sr = sampleRate || 16000;
+    const audioBuffer = monitorAudioContext.createBuffer(1, sampleCount, sr);
     const channel = audioBuffer.getChannelData(0);
 
+    // Schnelle PCM16-LE Dekodierung mit DataView
+    const rawBuf = new ArrayBuffer(binary.length);
+    const rawView = new Uint8Array(rawBuf);
+    for (let i = 0; i < binary.length; i++) rawView[i] = binary.charCodeAt(i);
+    const dataView = new DataView(rawBuf);
     for (let i = 0; i < sampleCount; i++) {
-      const lo = binary.charCodeAt(i * 2);
-      const hi = binary.charCodeAt(i * 2 + 1);
-      let sample = (hi << 8) | lo;
-      if (sample >= 0x8000) sample -= 0x10000;
-      channel[i] = sample / 32768;
+      channel[i] = dataView.getInt16(i * 2, true) / 32768;
     }
 
     const source = monitorAudioContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(monitorGainNodes[track]);
 
-    const startAt = Math.max(monitorAudioContext.currentTime + 0.05, monitorNextTimes[track] || 0);
-    source.start(startAt);
-    monitorNextTimes[track] = startAt + audioBuffer.duration;
+    // Scheduling: lückenlos aneinanderhängen, mit 100ms Vorlauf-Buffer
+    const now = monitorAudioContext.currentTime;
+    const minStart = now + 0.1;  // 100ms Vorlauf für Jitter-Toleranz
+    const scheduled = monitorNextTimes[track] || 0;
+    const startAt = Math.max(minStart, scheduled);
+
+    // Bei zu großer Drift (>2s) → resync
+    if (startAt - now > 2.0) {
+      monitorNextTimes[track] = minStart;
+      source.start(minStart);
+      monitorNextTimes[track] = minStart + audioBuffer.duration;
+    } else {
+      source.start(startAt);
+      monitorNextTimes[track] = startAt + audioBuffer.duration;
+    }
   }
 
   async function openHistoryDetail(sessionId) {

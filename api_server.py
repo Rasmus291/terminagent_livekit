@@ -1,14 +1,18 @@
 """
 Einfacher API-Server für das LaVita Terminagent Frontend.
 Stellt Endpoints für Kontakte und Anrufe via LiveKit SIP bereit.
+Enthält WebSocket-Relay für Live-Audio-Monitor.
 
 Starten: python api_server.py
 """
 
 import asyncio
+import base64
 import datetime
+import glob
 import logging
 import os
+import re
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -16,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 load_dotenv()
 
@@ -29,6 +34,24 @@ SIP_TRUNK_ID = os.getenv("LIVEKIT_SIP_TRUNK_ID", "")
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "lavita-agent")
 
 app = FastAPI(title="LaVita Terminagent API")
+
+# ── Live-Audio-Monitor: WebSocket-Relay ──────────────────────────────────
+# Browser verbinden sich per WebSocket, Agent sendet Audio per HTTP POST.
+_monitor_clients: set[WebSocket] = set()
+_monitor_call_state: dict = {"active": False, "contact_name": "", "caller_id": ""}
+
+
+async def _broadcast_monitor(data: dict):
+    """Sendet JSON-Daten an alle verbundenen Monitor-Clients."""
+    dead = set()
+    import json
+    msg = json.dumps(data)
+    for ws in _monitor_clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.add(ws)
+    _monitor_clients -= dead
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,6 +147,116 @@ async def start_call(req: CallRequest):
 @app.get("/")
 async def serve_frontend():
     return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "index.html"))
+
+
+# ── Monitor WebSocket (Browser) ─────────────────────────────────────────
+@app.websocket("/monitor/ws")
+async def monitor_ws(ws: WebSocket):
+    """WebSocket für Browser-Clients zum Live-Mithören."""
+    await ws.accept()
+    _monitor_clients.add(ws)
+    logger.info("Monitor-Client verbunden. Clients: %d", len(_monitor_clients))
+    try:
+        # Sende aktuellen Call-State
+        await ws.send_json({"type": "state", **_monitor_call_state})
+        # Halte Verbindung offen — Daten kommen über _broadcast_monitor
+        while True:
+            # Warte auf Client-Nachrichten (Ping/Pong oder Close)
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _monitor_clients.discard(ws)
+        logger.info("Monitor-Client getrennt. Clients: %d", len(_monitor_clients))
+
+
+# ── Monitor HTTP API (Agent → Server) ───────────────────────────────────
+class MonitorAudioChunk(BaseModel):
+    track: str  # "partner" oder "agent"
+    sample_rate: int = 16000
+    pcm16_b64: str  # Base64-encoded PCM16 LE
+
+
+@app.post("/monitor/audio")
+async def monitor_audio(chunk: MonitorAudioChunk):
+    """Empfängt Audio-Chunks vom Agent und leitet sie an Browser weiter."""
+    if not _monitor_clients:
+        return {"relayed": 0}
+    await _broadcast_monitor({
+        "type": "audio",
+        "track": chunk.track,
+        "sample_rate": chunk.sample_rate,
+        "pcm16": chunk.pcm16_b64,
+    })
+    return {"relayed": len(_monitor_clients)}
+
+
+@app.post("/monitor/call-state")
+async def monitor_call_state(state: dict):
+    """Aktualisiert den Call-State (call-start / call-end)."""
+    _monitor_call_state.update(state)
+    await _broadcast_monitor({"type": state.get("event", "state"), **state})
+    return {"ok": True}
+
+
+@app.get("/twilio/call-history")
+async def get_call_history(limit: int = 5):
+    """Gibt die letzten Session-Reports zurück."""
+    sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
+    if not os.path.isdir(sessions_dir):
+        return {"sessions": []}
+
+    files = sorted(glob.glob(os.path.join(sessions_dir, "session_*.md")), reverse=True)[:limit]
+    sessions = []
+    for f in files:
+        fname = os.path.basename(f)
+        # Extract timestamp from filename: session_YYYYMMDD_HHMMSS.md
+        m = re.search(r"session_(\d{8})_(\d{6})", fname)
+        ts = ""
+        if m:
+            d, t = m.group(1), m.group(2)
+            ts = f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}"
+
+        # Parse basic info from file
+        try:
+            with open(f, encoding="utf-8") as fh:
+                content = fh.read(2000)
+        except Exception:
+            content = ""
+
+        partner = ""
+        status = ""
+        for line in content.split("\n"):
+            if "Partner:" in line:
+                partner = line.split("Partner:", 1)[1].strip().strip("*")
+            elif "Status:" in line or "Ergebnis:" in line:
+                status = line.split(":", 1)[1].strip().strip("*")
+
+        sessions.append({
+            "id": fname.replace(".md", ""),
+            "timestamp": ts,
+            "partner": partner,
+            "status": status,
+            "filename": fname,
+        })
+    return {"sessions": sessions}
+
+
+@app.get("/twilio/call-history/{session_id}")
+async def get_call_detail(session_id: str):
+    """Gibt den vollständigen Session-Report zurück."""
+    # Sanitize session_id to prevent path traversal
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)
+    sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
+    path = os.path.join(sessions_dir, f"{safe_id}.md")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
+        return {"id": safe_id, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
