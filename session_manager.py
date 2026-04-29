@@ -6,9 +6,59 @@ import logging
 import os
 import time
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 _START_TRIGGER_PREFIX = "[START_TRIGGER]"
+
+# Audio-Latenz-Tracking (User stoppt → Agent spricht)
+_user_stopped_speaking_at: float | None = None
+_audio_latencies: list[float] = []
+
+
+def register_audio_latency_events(session):
+    """Registriert Events zur echten Audio-Latenz-Messung."""
+    global _user_stopped_speaking_at, _audio_latencies
+    _user_stopped_speaking_at = None
+    _audio_latencies = []
+
+    def on_user_state(event):
+        global _user_stopped_speaking_at
+        if event.new_state == "listening" and event.old_state == "speaking":
+            _user_stopped_speaking_at = event.created_at
+
+    def on_agent_state(event):
+        global _user_stopped_speaking_at
+        if event.new_state == "speaking" and event.old_state in ("thinking", "listening"):
+            if _user_stopped_speaking_at is not None:
+                latency = event.created_at - _user_stopped_speaking_at
+                if 0 < latency < 30:  # plausibel
+                    _audio_latencies.append(latency)
+                    logger.info("🎙️ Audio-Latenz: %.2fs (User→Agent)", latency)
+                    # An Monitor-API senden
+                    asyncio.create_task(_send_latency(latency))
+                _user_stopped_speaking_at = None
+
+    session.on("user_state_changed", on_user_state)
+    session.on("agent_state_changed", on_agent_state)
+
+
+async def _send_latency(latency: float):
+    """Sendet Latenz-Messung an die Monitor-API."""
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                "http://localhost:8080/monitor/latency",
+                json={"latency": round(latency, 3), "avg": round(sum(_audio_latencies) / len(_audio_latencies), 3) if _audio_latencies else latency},
+                timeout=2,
+            )
+    except Exception:
+        pass
+
+
+def get_audio_latencies() -> list[float]:
+    return list(_audio_latencies)
 
 
 def create_conversation_handler(session_transcript, latencies_list, started_event, farewell_imports):
@@ -55,15 +105,26 @@ def create_conversation_handler(session_transcript, latencies_list, started_even
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
 
-            # Farewell-Timer
-            from tool_handler import assistant_farewell_detected, call_ended
+            # Farewell: Agent hat sich verabschiedet → warte kurz auf Partner-Verabschiedung, dann sofort auflegen
+            from tool_handler import assistant_farewell_detected, partner_farewell_detected, call_ended
             if assistant_farewell_detected and not call_ended.is_set():
                 async def _farewell_timer():
-                    await asyncio.sleep(5)
+                    # Warte max 3s auf Partner-Verabschiedung, dann sofort auflegen
+                    for _ in range(30):  # 30 * 100ms = 3s
+                        await asyncio.sleep(0.1)
+                        if partner_farewell_detected or call_ended.is_set():
+                            break
                     if not call_ended.is_set():
-                        logger.info("⏰ Farewell-Timer abgelaufen — erzwinge Auflegen.")
+                        logger.info("Auflegen nach Verabschiedung.")
                         call_ended.set()
                 asyncio.create_task(_farewell_timer())
+
+        # Partner verabschiedet sich → sofort auflegen (Agent hat schon gesprochen)
+        if role == "user":
+            from tool_handler import assistant_farewell_detected as _asst_fw, partner_farewell_detected as _part_fw, call_ended as _ce
+            if _part_fw and _asst_fw and not _ce.is_set():
+                logger.info("Beide verabschiedet — lege sofort auf.")
+                _ce.set()
 
     return on_conversation_item
 
@@ -94,16 +155,18 @@ async def finalize_session(
         call_start_time=call_start_str, analysis=analysis, timestamp=session_timestamp,
     )
 
-    if crm_data:
+    # E-Mail immer senden (basierend auf Analyse)
+    try:
         import email_service
-        email_service.send_appointment_proposal(
-            partner_name=crm_data.get("partner_name", "Unbekannt"),
-            appointment_date=crm_data.get("appointment_date", ""),
-            notes=crm_data.get("notes", ""),
-            status=crm_data.get("status", "unbekannt"),
-            calendly_link=crm_data.get("calendly_link"),
+        email_service.send_call_result_summary(
+            call_start_time=call_start_str,
+            call_duration_seconds=call_duration,
+            crm_data=crm_data,
             analysis=analysis,
+            transcript=session_transcript,
         )
+    except Exception as e:
+        logger.error("E-Mail-Versand fehlgeschlagen: %s", e)
 
     await audio_recorder.notify_call_end()
     audio_recorder.stop()
@@ -133,6 +196,12 @@ async def end_call_monitor(ctx, finalize_fn, session):
         reason = f"fehler: {e}"
         logger.error("Fehler im End-Call Monitor: %s", e, exc_info=True)
     finally:
+        # Sofort Session unterbrechen damit Agent nichts mehr sagt
+        try:
+            session.interrupt()
+        except Exception:
+            pass
+
         try:
             await finalize_fn(reason)
         except Exception as e:
