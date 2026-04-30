@@ -93,10 +93,10 @@ def mark_partner_farewell(text: str) -> bool:
     if _is_strict_farewell(text):
         partner_farewell_detected = True
         logger.info("Partner-Verabschiedung erkannt.")
-        if pending_end_call and not call_ended.is_set():
-            logger.info("Partner-Verabschiedung nach früherem end_call erkannt. Beende Gespräch jetzt.")
+        if not call_ended.is_set():
+            # Partner says goodbye → hang up immediately (don't wait for agent farewell)
+            logger.info("Partner verabschiedet sich — lege sofort auf.")
             call_ended.set()
-        _trigger_end_if_both_farewells("partner")
         return True
     return False
 

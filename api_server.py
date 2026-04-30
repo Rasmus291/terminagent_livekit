@@ -126,6 +126,9 @@ async def start_call(req: CallRequest):
             phone = contact.get("phone")
             if not phone:
                 raise HTTPException(status_code=400, detail="Kontakt hat keine Telefonnummer")
+            # Name aus Kontakt übernehmen falls nicht explizit angegeben
+            if not req.name:
+                req.name = contact.get("last_name") or contact.get("name") or ""
         except HTTPException:
             raise
         except Exception as e:
@@ -189,9 +192,8 @@ async def get_call_status(call_sid: str):
             rooms = await lk.room.list_rooms()
             for room in rooms:
                 if room.name == safe_sid:
-                    if room.num_participants > 0:
-                        return {"status": "in-progress", "participants": room.num_participants}
-                    return {"status": "completed"}
+                    # Room existiert = Anruf läuft (auch wenn noch keine Participants)
+                    return {"status": "in-progress", "participants": room.num_participants}
             return {"status": "completed"}
     except Exception as e:
         logger.warning("Call-Status-Abfrage fehlgeschlagen: %s", e)
@@ -277,6 +279,13 @@ async def monitor_call_state(state: dict):
     """Aktualisiert den Call-State (call-start / call-end)."""
     _monitor_call_state.update(state)
     await _broadcast_monitor({"type": state.get("event", "state"), **state})
+    return {"ok": True}
+
+
+@app.post("/monitor/latency")
+async def monitor_latency(data: dict):
+    """Empfängt Audio-Latenz-Messungen und sendet sie an die UI."""
+    await _broadcast_monitor({"type": "latency", "latency": data.get("latency", 0), "avg": data.get("avg", 0)})
     return {"ok": True}
 
 

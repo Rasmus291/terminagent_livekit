@@ -185,11 +185,15 @@ async def format_available_slots(days_ahead: int = 5) -> str:
         days.setdefault(day_key, []).append(time_str)
 
     lines = ["Verfügbare Termine:"]
+    day_count = 0
     for day, times in days.items():
-        times_str = ", ".join(times[:6])  # Max 6 Zeiten pro Tag zeigen
-        if len(times) > 6:
-            times_str += f" (+{len(times) - 6} weitere)"
+        if day_count >= 3:
+            break
+        times_str = ", ".join(times[:4])  # Max 4 Zeiten pro Tag
+        if len(times) > 4:
+            times_str += f" (+{len(times) - 4} weitere)"
         lines.append(f"  {day}: {times_str}")
+        day_count += 1
 
     return "\n".join(lines)
 

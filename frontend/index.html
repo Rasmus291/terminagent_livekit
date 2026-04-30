@@ -504,6 +504,11 @@
           <div id="agent-monitor-status" class="monitor-status monitor-state-idle">—</div>
           <div class="monitor-meta">Live-Ausgabe der Stimme von Anna / Agent.</div>
         </div>
+        <div class="monitor-panel" id="latency-panel" style="display:none;">
+          <h4>🎙️ Audio-Latenz</h4>
+          <div id="latency-current" style="font-size:2em;font-weight:bold;color:#2563eb;">—</div>
+          <div class="monitor-meta">Letzte: <span id="latency-last">—</span> | Ø <span id="latency-avg">—</span></div>
+        </div>
       </div>
     </div>
   </div>
@@ -690,6 +695,9 @@
 
   function stopLiveMonitor() {
     monitorEnabled = false;
+    stopRingback();
+    if (monitorCallTimer) { clearInterval(monitorCallTimer); monitorCallTimer = null; }
+    monitorCallStartTime = null;
     if (monitorSocket) {
       try { monitorSocket.close(); } catch {}
       monitorSocket = null;
@@ -701,10 +709,64 @@
     resetMonitorTrackStatus();
   }
 
+  let monitorCallStartTime = null;
+  let monitorCallTimer = null;
+  let ringbackOscillator = null;
+  let ringbackGain = null;
+  let ringbackInterval = null;
+  let firstAudioReceived = false;
+
+  function startRingback() {
+    if (!monitorAudioContext || ringbackInterval) return;
+    firstAudioReceived = false;
+    const ctx = monitorAudioContext;
+    ringbackGain = ctx.createGain();
+    ringbackGain.gain.value = 0;
+    ringbackGain.connect(ctx.destination);
+    ringbackOscillator = ctx.createOscillator();
+    ringbackOscillator.type = 'sine';
+    ringbackOscillator.frequency.value = 425;
+    ringbackOscillator.connect(ringbackGain);
+    ringbackOscillator.start();
+    // German ringback pattern: 1s on, 4s off
+    let phase = 0;
+    function tick() {
+      if (!ringbackGain) return;
+      ringbackGain.gain.value = (phase % 5 === 0) ? 0.15 : 0;
+      phase++;
+    }
+    tick();
+    ringbackInterval = setInterval(tick, 1000);
+  }
+
+  function stopRingback() {
+    if (ringbackInterval) { clearInterval(ringbackInterval); ringbackInterval = null; }
+    if (ringbackOscillator) { try { ringbackOscillator.stop(); } catch {} ringbackOscillator = null; }
+    if (ringbackGain) { ringbackGain.disconnect(); ringbackGain = null; }
+  }
+
+  function updateMonitorCallDuration() {
+    if (!monitorCallStartTime) return;
+    const elapsed = Math.floor((Date.now() - monitorCallStartTime) / 1000);
+    const min = Math.floor(elapsed / 60);
+    const sec = elapsed % 60;
+    const meta = document.getElementById('monitor-call-meta');
+    if (meta && meta._callName) {
+      meta.textContent = `${meta._callName} — ${min}:${sec.toString().padStart(2, '0')}`;
+    }
+  }
+
   function handleMonitorMessage(payload) {
     if (payload.type === 'state') {
       if (payload.active) {
-        updateMonitorCallMeta(`Aktiver Anruf: ${payload.contact_name || payload.caller_id || 'Unbekannt'}`);
+        const name = payload.contact_name || payload.caller_id || 'Unbekannt';
+        updateMonitorCallMeta(`🟢 Anruf läuft: ${name}`);
+        const meta = document.getElementById('monitor-call-meta');
+        if (meta) meta._callName = `🟢 Anruf läuft: ${name}`;
+        if (!monitorCallStartTime) {
+          monitorCallStartTime = Date.now();
+          monitorCallTimer = setInterval(updateMonitorCallDuration, 1000);
+        }
       } else {
         updateMonitorCallMeta('Kein aktiver Anruf.');
       }
@@ -712,20 +774,59 @@
     }
 
     if (payload.type === 'call-start') {
-      updateMonitorCallMeta(`Aktiver Anruf: ${payload.contact_name || payload.caller_id || 'Unbekannt'}`);
+      const name = payload.contact_name || payload.caller_id || 'Unbekannt';
+      updateMonitorCallMeta(`� Klingelt: ${name}`);
+      const meta = document.getElementById('monitor-call-meta');
+      if (meta) meta._callName = `🟢 Anruf läuft: ${name}`;
+      monitorCallStartTime = Date.now();
+      if (monitorCallTimer) clearInterval(monitorCallTimer);
+      monitorCallTimer = setInterval(updateMonitorCallDuration, 1000);
       resetMonitorTrackStatus();
+      startRingback();
       return;
     }
 
     if (payload.type === 'call-end') {
-      updateMonitorCallMeta('Kein aktiver Anruf.');
+      stopRingback();
+      if (monitorCallTimer) { clearInterval(monitorCallTimer); monitorCallTimer = null; }
+      const elapsed = monitorCallStartTime ? Math.floor((Date.now() - monitorCallStartTime) / 1000) : 0;
+      const min = Math.floor(elapsed / 60);
+      const sec = elapsed % 60;
+      monitorCallStartTime = null;
+      updateMonitorCallMeta(`🔴 Anruf beendet (Dauer: ${min}:${sec.toString().padStart(2, '0')})`);
       resetMonitorTrackStatus();
+      // Automatisch Live-Mithören stoppen
+      setTimeout(() => { if (monitorEnabled) stopLiveMonitor(); }, 2000);
       return;
     }
 
     if (payload.type === 'audio' && payload.pcm16) {
+      // Stop ringback on first audio
+      if (!firstAudioReceived) {
+        firstAudioReceived = true;
+        stopRingback();
+        // Update status to "Anruf läuft"
+        const meta = document.getElementById('monitor-call-meta');
+        if (meta && meta._callName) meta.textContent = meta._callName;
+      }
       playMonitorChunk(payload.track, payload.sample_rate, payload.pcm16);
       updateMonitorTrackStatus(payload.track, '🔊 Audio läuft', true);
+    }
+
+    if (payload.type === 'latency') {
+      const panel = document.getElementById('latency-panel');
+      if (panel) panel.style.display = '';
+      const ms = Math.round(payload.latency * 1000);
+      const avgMs = Math.round(payload.avg * 1000);
+      const el = document.getElementById('latency-current');
+      if (el) {
+        el.textContent = ms + 'ms';
+        el.style.color = ms < 1000 ? '#16a34a' : ms < 1500 ? '#d97706' : '#dc2626';
+      }
+      const lastEl = document.getElementById('latency-last');
+      if (lastEl) lastEl.textContent = ms + 'ms';
+      const avgEl = document.getElementById('latency-avg');
+      if (avgEl) avgEl.textContent = avgMs + 'ms';
     }
   }
 
@@ -915,11 +1016,14 @@
 
   async function checkActiveCallStatus() {
     if (!activeCall?.sid) return;
+    // Grace period: ignore "completed" in first 10s (room may not exist yet)
+    const elapsed = Date.now() - (activeCall.startedAt || 0);
     try {
       const r = await fetch(`${API}/twilio/call-status/${encodeURIComponent(activeCall.sid)}`);
       if (!r.ok) return;
       const data = await r.json();
       if (!isCallActiveStatus(data.status)) {
+        if (elapsed < 10000) return; // Still in grace period
         const target = activeCall.target;
         clearActiveCall();
         showToast('Anruf beendet', `${target} (${data.status || 'beendet'})`, 'info');
@@ -930,7 +1034,7 @@
   }
 
   function setActiveCall(callSid, source, target, contactId = null) {
-    activeCall = { sid: callSid, source, target, contactId };
+    activeCall = { sid: callSid, source, target, contactId, startedAt: Date.now() };
     refreshButtonStates();
     startStatusPolling();
   }
