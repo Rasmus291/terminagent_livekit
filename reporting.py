@@ -182,13 +182,17 @@ def generate_analysis(transcript):
 Antworte NUR mit validem JSON (kein Markdown, keine Code-Blöcke), exakt in diesem Format:
 {{
   "zusammenfassung": "Kurze, prägnante Zusammenfassung auf Deutsch (2-4 Sätze). Wichtigste Punkte und Ergebnis.",
+  "partner_name": "Nachname des Partners falls erkennbar, sonst 'Unbekannt'",
+  "termin": "Vereinbarter Termin als 'YYYY-MM-DD HH:MM' oder leer wenn keiner",
   "sentiment_partner": 7,
   "sentiment_gesamt": "positiv",
-  "stimmung_details": "Kurze Beschreibung der Stimmung des Partners, z.B. interessiert, gestresst, ablehnend",
+  "stimmung_details": "Kurze Beschreibung der Stimmung des Partners",
   "ergebnis": "scheduled"
 }}
 
 Felder:
+- partner_name: Nachname des Partners (aus Begrüßung erkennbar)
+- termin: Vereinbarter Termin (Datum+Uhrzeit) oder "" wenn keiner
 - sentiment_partner: 1-10 (1=sehr negativ, 10=sehr positiv)
 - sentiment_gesamt: "positiv", "neutral" oder "negativ"
 - ergebnis: "scheduled", "declined", "callback" oder "unbekannt"
