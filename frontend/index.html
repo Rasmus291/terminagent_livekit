@@ -348,7 +348,6 @@
       line-height: 1.45;
       font-size: 13px;
       color: var(--gray-900);
-      white-space: pre-wrap;
       background: var(--gray-50);
       border: 1px solid var(--gray-200);
       border-radius: 8px;
@@ -356,6 +355,11 @@
       max-height: 240px;
       overflow: auto;
     }
+    .tx-line { padding: 3px 0; }
+    .tx-agent .tx-meta { color: var(--primary); font-weight: 600; margin-right: 6px; }
+    .tx-user .tx-meta { color: var(--success); font-weight: 600; margin-right: 6px; }
+    .tx-meta { font-size: 11px; }
+    .tx-msg { font-size: 13px; }
 
     .audio-list {
       display: grid;
@@ -577,10 +581,17 @@
     const listEl = document.getElementById('history-list');
     listEl.innerHTML = '<div class="loading"><div class="spinner"></div><br>Anrufhistorie wird geladen…</div>';
     try {
-      const r = await fetch(API + '/twilio/call-history?limit=5');
+      const r = await fetch(API + '/twilio/call-history?limit=20');
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
-      historyItems = data.items || [];
+      historyItems = (data.sessions || data.items || []).map(item => ({
+        session_id: item.id || item.session_id,
+        date_time: item.timestamp || item.date_time,
+        partner: item.partner,
+        status: item.status,
+        duration: item.duration || '-',
+        summary_preview: item.summary_preview || ''
+      }));
       renderHistoryList(historyItems);
       if (historyItems.length) {
         const nextId = selectedSessionId || historyItems[0].session_id;
@@ -888,6 +899,23 @@
     }
   }
 
+  function formatTranscript(text) {
+    if (!text) return '<span style="color:var(--gray-500)">Kein Transkript vorhanden.</span>';
+    return text.split('\n').map(line => {
+      if (!line.trim()) return '';
+      // Convert **[timestamp] Role:** text → styled HTML
+      const m = line.match(/^\*\*(\[[^\]]*\])\s*(User|Agent|Partner):\*\*\s*(.*)/);
+      if (m) {
+        const ts = esc(m[1]);
+        const role = m[2];
+        const msg = esc(m[3]);
+        const cls = role === 'Agent' ? 'tx-agent' : 'tx-user';
+        return `<div class="tx-line ${cls}"><span class="tx-meta">${ts} ${role}</span><span class="tx-msg">${msg}</span></div>`;
+      }
+      return `<div class="tx-line">${esc(line)}</div>`;
+    }).join('');
+  }
+
   function renderHistoryDetail(item) {
     const detailEl = document.getElementById('history-detail');
     const audioFiles = item.audio_files || [];
@@ -912,7 +940,7 @@
       <div class="detail-summary">${esc(item.summary || 'Keine Zusammenfassung vorhanden.')}</div>
 
       <div class="detail-section-title">Transkript</div>
-      <div class="detail-transcript">${esc(item.transcript || 'Kein Transkript vorhanden.')}</div>
+      <div class="detail-transcript">${formatTranscript(item.transcript)}</div>
 
       <div class="detail-section-title">Audio-Dateien</div>
       ${audioHtml}

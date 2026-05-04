@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from datetime import datetime
 
 import calendly_service
 import email_service
@@ -58,6 +59,48 @@ def _is_strict_farewell(text: str) -> bool:
         if re.search(pattern, normalized):
             return True
     return False
+
+
+# Weekday booking windows (local Berlin time): Mon-Thu 8-17, Fri 8-16
+_BOOKING_WINDOWS = {0: (8, 17), 1: (8, 17), 2: (8, 17), 3: (8, 17), 4: (8, 16)}
+
+
+def _validate_appointment_time(appointment_date: str) -> str:
+    """Returns an error message if the appointment time is outside business hours, else empty string."""
+    date_formats = [
+        "%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%Y-%m-%dT%H:%M",
+        "%d.%m.%Y %H:%M Uhr", "%d.%m. %H:%M", "%Y-%m-%d",
+    ]
+    dt = None
+    clean = appointment_date.strip().replace(" Uhr", "")
+    for fmt in date_formats:
+        try:
+            dt = datetime.strptime(clean, fmt)
+            break
+        except ValueError:
+            continue
+
+    if dt is None:
+        return ""  # Can't parse → allow, agent may have natural-language date
+
+    weekday = dt.weekday()
+    if weekday not in _BOOKING_WINDOWS:
+        return (
+            "Keine Termine am Wochenende möglich. Bitte biete einen Termin von "
+            "Montag bis Freitag an."
+        )
+
+    start_h, end_h = _BOOKING_WINDOWS[weekday]
+    hour = dt.hour + dt.minute / 60.0
+    if hour < start_h or hour >= end_h:
+        day_names = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
+        return (
+            f"{dt.strftime('%H:%M')} Uhr liegt außerhalb der Bürozeiten "
+            f"({start_h}:00–{end_h}:00 Uhr am {day_names[weekday]}). "
+            f"Bitte schlage dem Partner eine Zeit innerhalb der Bürozeiten vor."
+        )
+
+    return ""
 
 
 def has_confirmed_appointment() -> bool:
@@ -158,6 +201,16 @@ async def schedule_appointment(
         }
 
     if normalized_status == "scheduled":
+        # Validate appointment time against business hours
+        if appointment_date:
+            time_error = _validate_appointment_time(appointment_date)
+            if time_error:
+                logger.warning("Terminzeit außerhalb der Bürozeiten: %s — %s", appointment_date, time_error)
+                return {
+                    "status": "invalid_time",
+                    "message": time_error,
+                }
+
         missing_fields: list[str] = []
         if not (appointment_date or "").strip():
             missing_fields.append("appointment_date")

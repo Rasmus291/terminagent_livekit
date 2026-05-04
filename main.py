@@ -58,13 +58,13 @@ async def lavita_agent(ctx: JobContext):
     started_event = asyncio.Event()
     recorder = RoomAudioRecorder()
 
-    # Calendly parallel laden
+    # Calendly parallel laden — 2s Timeout da API variabel
     async def _load_calendly():
         try:
             import calendly_service
             slots = await calendly_service.format_available_slots(days_ahead=5)
             if slots and "Keine freien" not in slots:
-                return f"\n\nVERFÜGBARE TERMINE (vorab geladen):\n{slots}"
+                return f"\n\nVERFÜGBARE TERMINE:\n{slots}"
         except Exception:
             pass
         return ""
@@ -89,12 +89,12 @@ async def lavita_agent(ctx: JobContext):
     await ctx.connect()
     recorder.start(ctx.room)
 
-    # Calendly mit Timeout — maximal 1s warten, sonst ohne Slots starten
+    # Calendly mit Timeout — 2s sind realistischer
     try:
-        cached_slots = await asyncio.wait_for(calendly_task, timeout=1.0)
+        cached_slots = await asyncio.wait_for(calendly_task, timeout=2.0)
     except asyncio.TimeoutError:
         cached_slots = ""
-        logger.warning("Calendly nicht rechtzeitig geladen — starte ohne Slots")
+        logger.warning("Calendly-Timeout — starte ohne Slots")
     instructions = f"{SYSTEM_INSTRUCTION}{cached_slots}"
 
     agent = LaVitaLiveKitAgent(instructions=instructions)
@@ -107,19 +107,19 @@ async def lavita_agent(ctx: JobContext):
             language="de-DE",
             realtime_input_config=genai_types.RealtimeInputConfig(
                 automaticActivityDetection=genai_types.AutomaticActivityDetection(
-                    startOfSpeechSensitivity=genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
-                    endOfSpeechSensitivity=genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silenceDurationMs=250, prefixPaddingMs=100,
+                    startOfSpeechSensitivity=genai_types.StartSensitivity.START_SENSITIVITY_MEDIUM,
+                    endOfSpeechSensitivity=genai_types.EndSensitivity.END_SENSITIVITY_MEDIUM,
+                    silenceDurationMs=1000, prefixPaddingMs=300,
                 ),
             ),
         ),
         vad=silero.VAD.load(
-            min_silence_duration=0.25, min_speech_duration=0.2,
-            prefix_padding_duration=0.15, activation_threshold=0.7,
+            min_silence_duration=0.8, min_speech_duration=0.1,
+            prefix_padding_duration=0.2, activation_threshold=0.6,
         ),
         turn_handling={
             "turn_detection": "realtime_llm",
-            "endpointing": {"mode": "dynamic", "min_delay": 0.1, "max_delay": 0.4},
+            "endpointing": {"mode": "dynamic", "min_delay": 0.6, "max_delay": 1.2},
         },
         min_interruption_duration=0.8,
         min_interruption_words=2,
@@ -128,11 +128,12 @@ async def lavita_agent(ctx: JobContext):
     )
 
     # Event-Handler registrieren
-    handler = create_conversation_handler(transcript, latencies, started_event, {
+    handler, user_transcribed_handler = create_conversation_handler(transcript, latencies, started_event, {
         "mark_partner_farewell": mark_partner_farewell,
         "mark_assistant_farewell": mark_assistant_farewell,
     })
     session.on("conversation_item_added", handler)
+    session.on("user_input_transcribed", user_transcribed_handler)
     register_audio_latency_events(session)
 
     def on_close(event):
@@ -140,44 +141,55 @@ async def lavita_agent(ctx: JobContext):
             call_ended.set()
     session.on("close", on_close)
 
-    # Session sofort starten (verbindet zu Gemini) — parallel zum Warten auf Partner
+    # Session sofort starten — parallel zu wait_for_participant, damit Greeting bereit ist
     session_start_task = asyncio.create_task(session.start(room=ctx.room, agent=agent))
 
     job_id = str(getattr(getattr(ctx, "job", None), "id", ""))
     partner_name = ""
-    if not job_id.startswith("mock-job"):
-        timeout = float(os.getenv("LIVEKIT_WAIT_PARTICIPANT_SECS", "45"))
+    
+    # Parallel: Warte auf Teilnehmer (max 45s) — aber blockiere nicht Greeting wenn Teilnehmer verspätet
+    async def _extract_partner_name():
+        nonlocal partner_name
+        if job_id.startswith("mock-job"):
+            return
         try:
+            timeout = float(os.getenv("LIVEKIT_WAIT_PARTICIPANT_SECS", "45"))
             participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=timeout)
             pname = getattr(participant, "name", "") or ""
-            logger.info("Participant name: '%s'", pname)
             if pname.startswith("Partner (") and pname.endswith(")"):
                 extracted = pname[9:-1]
                 if not extracted.startswith("+") and not extracted.startswith("phone-"):
                     partner_name = extracted
             elif pname and not pname.startswith("phone-") and not pname.startswith("+"):
                 partner_name = pname
+            if partner_name:
+                logger.info("Partner-Name erkannt: %s", partner_name)
         except asyncio.TimeoutError:
-            logger.warning("Kein Teilnehmer innerhalb von %.0fs.", timeout)
-
-    # notify_call_start mit contact_name (nach Participant-Erkennung)
-    asyncio.create_task(recorder.notify_call_start(contact_name=partner_name))
-
-    # Sicherstellen dass Session bereit ist
-    await session_start_task
-    logger.info("Gemini-Session bereit — starte Begrüßung sofort.")
+            logger.warning("Kein Teilnehmer erkannt (Timeout)")
+        except Exception as e:
+            logger.warning("Fehler beim Participant-Abruf: %s", e)
+    
+    # Starte Partner-Name-Erkennung im Hintergrund (maximal 5s, dann trotzdem fortfahren)
+    partner_extraction_task = asyncio.create_task(_extract_partner_name())
+    try:
+        await asyncio.wait_for(partner_extraction_task, timeout=5.0)
+    except asyncio.TimeoutError:
+        pass
 
     async def run():
-        # Kurze Pause damit der Partner "Hallo?" sagen kann
-        await asyncio.sleep(0.5)
-        name_hint = f" Der Partner heißt {partner_name}. Begrüße ihn mit 'Hallo Herr/Frau {partner_name}, hier ist Anna von LaVita.'" if partner_name else ""
-        trigger = f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen.{name_hint} Begrüße ihn jetzt freundlich und erkläre kurz dein Anliegen."
-        logger.info("Sende Gesprächseröffnung: %s", trigger[:80])
+        # Warte auf Session-Bereitschaft (sollte sehr schnell sein)
+        await session_start_task
+        
+        # Sofort Greeting ohne Pause (Partner hat registriert, Gemini bereit)
+        name_hint = f" Der Partner heißt {partner_name}." if partner_name else ""
+        trigger = f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen.{name_hint} Begrüße ihn jetzt sofort freundlich und erkläre dein Anliegen."
+        logger.info("🎤 Greeting sofort: %s", trigger[:80])
         try:
             session.generate_reply(user_input=trigger)
         except Exception as e:
             logger.error("Gesprächseröffnung fehlgeschlagen: %s", e)
 
+    # Starte Call-Monitoring + Greeting parallel
     await asyncio.gather(run(), end_call_monitor(ctx, _finalize, session))
 
 

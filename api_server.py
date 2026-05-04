@@ -34,6 +34,11 @@ AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "lavita-agent")
 
 app = FastAPI(title="LaVita Terminagent API")
 
+# Serve session audio files (WAV recordings)
+_sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
+os.makedirs(_sessions_dir, exist_ok=True)
+app.mount("/sessions", StaticFiles(directory=_sessions_dir), name="sessions")
+
 # ── Live-Audio-Monitor: WebSocket-Relay ──────────────────────────────────
 # Browser verbinden sich per WebSocket, Agent sendet Audio per HTTP POST.
 _monitor_clients: set[WebSocket] = set()
@@ -187,10 +192,10 @@ async def get_call_status(call_sid: str):
     """Prüft ob ein Anruf (Room) noch aktiv ist."""
     safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "", call_sid)
     try:
-        from livekit.api import LiveKitAPI
+        from livekit.api import LiveKitAPI, ListRoomsRequest
         async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
-            rooms = await lk.room.list_rooms()
-            for room in rooms:
+            rooms_resp = await lk.room.list_rooms(ListRoomsRequest(names=[safe_sid]))
+            for room in rooms_resp.rooms:
                 if room.name == safe_sid:
                     # Room existiert = Anruf läuft (auch wenn noch keine Participants)
                     return {"status": "in-progress", "participants": room.num_participants}
@@ -208,14 +213,14 @@ async def hangup_call(req: dict):
         raise HTTPException(status_code=400, detail="call_sid fehlt")
     safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "", call_sid)
     try:
-        from livekit.api import LiveKitAPI, RoomParticipantIdentity
+        from livekit.api import LiveKitAPI, RoomParticipantIdentity, ListRoomsRequest, ListParticipantsRequest
         async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
-            rooms = await lk.room.list_rooms()
-            for room in rooms:
+            rooms_resp = await lk.room.list_rooms(ListRoomsRequest(names=[safe_sid]))
+            for room in rooms_resp.rooms:
                 if room.name == safe_sid:
                     # Alle Participants entfernen
-                    participants = await lk.room.list_participants(safe_sid)
-                    for p in participants:
+                    pts_resp = await lk.room.list_participants(ListParticipantsRequest(room=safe_sid))
+                    for p in pts_resp.participants:
                         await lk.room.remove_participant(
                             RoomParticipantIdentity(room=safe_sid, identity=p.identity)
                         )
@@ -334,8 +339,7 @@ async def get_call_history(limit: int = 5):
 
 @app.get("/twilio/call-history/{session_id}")
 async def get_call_detail(session_id: str):
-    """Gibt den vollständigen Session-Report zurück."""
-    # Sanitize session_id to prevent path traversal
+    """Gibt den vollständigen Session-Report zurück, aufbereitet für das Frontend."""
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)
     sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
     path = os.path.join(sessions_dir, f"{safe_id}.md")
@@ -344,9 +348,81 @@ async def get_call_detail(session_id: str):
     try:
         with open(path, encoding="utf-8") as fh:
             content = fh.read()
-        return {"id": safe_id, "content": content}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Parse markdown into structured fields ──────────────────────────
+    partner = ""
+    status = ""
+    date_time = ""
+    duration = ""
+    appointment_date = ""
+    summary_lines: list[str] = []
+    transcript_lines: list[str] = []
+
+    in_summary = False
+    in_transcript = False
+
+    for line in content.split("\n"):
+        stripped = line.strip()
+
+        # Section headers
+        if stripped.startswith("## "):
+            section = stripped[3:].lower()
+            in_summary = "zusammenfassung" in section
+            in_transcript = "transkript" in section
+            continue
+
+        # Key-value lines: - **Key:** Value
+        kv = re.match(r"-\s+\*\*([^*]+)\*\*[:\s]+(.+)", stripped)
+        if kv:
+            key = kv.group(1).strip().lower()
+            value = kv.group(2).strip()
+            if "partner" in key and not partner:
+                partner = value
+            elif key in ("status", "ergebnis") and not status:
+                status = value
+            elif "datum" in key or "uhrzeit" in key:
+                date_time = value
+            elif "dauer" in key or "länge" in key or "gespräch" in key:
+                duration = value
+            elif "termin" in key and "datum" not in key:
+                appointment_date = value
+            in_summary = False
+            in_transcript = False
+            continue
+
+        if in_summary and stripped and not stripped.startswith("*Kein"):
+            summary_lines.append(stripped)
+        elif in_transcript and stripped and not stripped.startswith("*Kein"):
+            transcript_lines.append(stripped)
+
+    summary = " ".join(summary_lines).strip()
+    transcript = "\n".join(transcript_lines).strip()
+
+    # ── Find matching audio files ──────────────────────────────────────
+    # Timestamp embedded in session id: session_YYYYMMDD_HHMMSS
+    # Audio files: recording_YYYYMMDD_HHMMSS.wav, recording_user_YYYYMMDD_HHMMSS.wav, etc.
+    ts_match = re.search(r"session_(\d{8}_\d{6})", safe_id)
+    audio_files = []
+    if ts_match:
+        ts = ts_match.group(1)
+        for fname in os.listdir(sessions_dir):
+            if fname.endswith(".wav") and ts in fname:
+                audio_files.append({"name": fname, "url": f"/sessions/{fname}"})
+
+    return {
+        "id": safe_id,
+        "partner": partner,
+        "status": status,
+        "date_time": date_time,
+        "duration": duration,
+        "appointment_date": appointment_date,
+        "summary": summary,
+        "transcript": transcript,
+        "audio_files": audio_files,
+        "content": content,  # raw markdown as fallback
+    }
 
 
 if __name__ == "__main__":
