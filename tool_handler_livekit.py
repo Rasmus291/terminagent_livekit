@@ -68,12 +68,12 @@ def has_confirmed_appointment() -> bool:
 
 
 def reset_call_state() -> None:
-    global partner_farewell_detected, assistant_farewell_detected, pending_end_call
+    global partner_farewell_detected, assistant_farewell_detected, pending_end_call, call_ended
     partner_farewell_detected = False
     assistant_farewell_detected = False
     pending_end_call = False
     crm_data_saved.clear()
-    call_ended.clear()
+    call_ended = asyncio.Event()
 
 
 def _trigger_end_if_both_farewells(source: str) -> bool:

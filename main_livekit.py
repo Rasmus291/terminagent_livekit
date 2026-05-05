@@ -15,9 +15,8 @@ from livekit.plugins import google, silero
 
 from config import GEMINI_API_KEY, MODEL_ID, SYSTEM_INSTRUCTION
 from reporting_livekit import build_learning_brief, generate_analysis, save_session_report
+import tool_handler_livekit as livekit_state
 from tool_handler_livekit import (
-    assistant_farewell_detected,
-    call_ended,
     check_availability,
     crm_data_saved,
     end_call,
@@ -194,8 +193,10 @@ async def lavita_agent(ctx: JobContext):
     runtime_instruction = (
         f"{SYSTEM_INSTRUCTION}{_cached_availability}\n\n"
         "AKTUELLER KONTEXT: Der Partner ist bereits in der Leitung. "
-        "Beginne jetzt proaktiv mit Begrüßung und kurzem Anliegen. "
-        "Mache noch keinen konkreten Terminslot in der ersten Aussage."
+        "Beginne jetzt proaktiv mit persönlicher Begrüßung und kurzem Anliegen. "
+        "Mache noch keinen konkreten Terminslot in der ersten Aussage. "
+        "Nenne zu Beginn oder am Ende keine feste Gesprächsdauer (z. B. '10 Minuten'), "
+        "außer der Partner fragt explizit danach."
     )
 
     agent = LaVitaLiveKitAgent(instructions=runtime_instruction)
@@ -213,8 +214,8 @@ async def lavita_agent(ctx: JobContext):
             "turn_detection": "realtime_llm",
             "endpointing": {
                 "mode": "dynamic",
-                "min_delay": 0.2,
-                "max_delay": 0.6,
+                "min_delay": 200,
+                "max_delay": 600,
             },
         },
     )
@@ -254,12 +255,12 @@ async def lavita_agent(ctx: JobContext):
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
             # Farewell-Timer: wenn Agent sich verabschiedet hat, nach 5s automatisch auflegen
-            if assistant_farewell_detected and not call_ended.is_set():
+            if livekit_state.assistant_farewell_detected and not livekit_state.call_ended.is_set():
                 async def _farewell_timer():
                     await asyncio.sleep(5)
-                    if not call_ended.is_set():
-                        logger.info("⏰ Farewell-Timer abgelaufen — erzwinge Auflegen.")
-                        call_ended.set()
+                    if not livekit_state.call_ended.is_set():
+                        logger.info("Farewell-Timer abgelaufen → beende Gespräch automatisch.")
+                        livekit_state.call_ended.set()
                 asyncio.create_task(_farewell_timer())
 
     session.on("conversation_item_added", on_conversation_item)
@@ -268,8 +269,8 @@ async def lavita_agent(ctx: JobContext):
         """Wird aufgerufen wenn die AgentSession geschlossen wird (z.B. Participant disconnect)."""
         reason = getattr(event, "reason", "unbekannt")
         logger.info("Session geschlossen (Grund: %s). Setze call_ended Event.", reason)
-        if not call_ended.is_set():
-            call_ended.set()
+        if not livekit_state.call_ended.is_set():
+            livekit_state.call_ended.set()
 
     session.on("close", on_session_close)
 
@@ -349,6 +350,7 @@ async def lavita_agent(ctx: JobContext):
     job_id = str(getattr(getattr(ctx, "job", None), "id", ""))
     is_console_job = job_id.startswith("mock-job")
     participant_wait_timeout = float(os.getenv("LIVEKIT_WAIT_PARTICIPANT_SECS", "45"))
+    partner_name_for_greeting = ""
     if is_console_job:
         logger.info("Console/Mock-Job erkannt (%s) – starte ohne Teilnehmer-Wartezeit.", job_id)
     else:
@@ -356,6 +358,10 @@ async def lavita_agent(ctx: JobContext):
             logger.info("Warte auf verbundenen Teilnehmer (timeout=%.0fs)...", participant_wait_timeout)
             participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=participant_wait_timeout)
             logger.info("Teilnehmer verbunden: identity=%s", participant.identity)
+            raw_name = str(getattr(participant, "name", "") or "").strip()
+            if raw_name.lower().startswith("partner (") and raw_name.endswith(")"):
+                raw_name = raw_name[9:-1].strip()
+            partner_name_for_greeting = raw_name
         except asyncio.TimeoutError:
             logger.warning("Kein Teilnehmer innerhalb von %.0fs erkannt. Starte trotzdem Session.", participant_wait_timeout)
 
@@ -365,7 +371,7 @@ async def lavita_agent(ctx: JobContext):
         try:
             logger.info("End-Call Monitor aktiviert. Warte auf Auflegen-Signal...")
             # Timeout auf 10 Minuten setzen um zu lange Calls zu vermeiden
-            await asyncio.wait_for(call_ended.wait(), timeout=600)
+            await asyncio.wait_for(livekit_state.call_ended.wait(), timeout=600)
             reason = "end_call aufgerufen"
             logger.info("End-Call Signal empfangen!")
         except asyncio.TimeoutError:
@@ -420,13 +426,23 @@ async def lavita_agent(ctx: JobContext):
             logger.error(f"Fehler beim Session-Start: {e}", exc_info=True)
             raise
 
-        # Minimal warten damit Gemini-WebSocket bereit ist
-        await asyncio.sleep(0.1)
+        # Nach Gesprächsannahme bewusst kurz warten (natürlicher Gesprächseinstieg)
+        await asyncio.sleep(1.0)
         try:
-            logger.info("Stoße Gesprächseröffnung sofort an...")
-            session.generate_reply(
-                user_input=f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. Begrüße ihn SOFORT.",
-            )
+            logger.info("Stoße Gesprächseröffnung nach 1s Wartezeit an...")
+            if partner_name_for_greeting:
+                opening_prompt = (
+                    f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. "
+                    f"Begrüße {partner_name_for_greeting} jetzt persönlich mit Namen und starte dann mit dem Anliegen. "
+                    "Nenne keine feste Gesprächsdauer."
+                )
+            else:
+                opening_prompt = (
+                    f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. "
+                    "Begrüße ihn freundlich zu Beginn des Gesprächs und starte dann mit dem Anliegen. "
+                    "Nenne keine feste Gesprächsdauer."
+                )
+            session.generate_reply(user_input=opening_prompt)
         except Exception as e:
             logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
 

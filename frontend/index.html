@@ -459,9 +459,11 @@
     <div class="card-header">
       <span class="icon">📋</span>
       Kontakte aus Excel
-      <button class="btn-refresh" onclick="loadContacts()">
-        ↻ Aktualisieren
-      </button>
+      <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+        <input type="file" id="contacts-file" accept=".xlsx" style="font-size:12px; max-width:180px;" />
+        <button class="btn-refresh" onclick="uploadContactsExcel()">⬆ Hochladen</button>
+        <button class="btn-refresh" onclick="loadContacts()">↻ Aktualisieren</button>
+      </div>
     </div>
     <div class="card-body" style="padding: 0;">
       <div id="contacts-state" class="loading">
@@ -565,6 +567,33 @@
       renderContacts(data.contacts || []);
     } catch(e) {
       state.innerHTML = '❌ Fehler beim Laden: ' + e.message;
+    }
+  }
+
+  async function uploadContactsExcel() {
+    const input = document.getElementById('contacts-file');
+    const file = input?.files?.[0];
+    if (!file) {
+      showToast('Datei fehlt', 'Bitte zuerst eine .xlsx Datei auswählen.', 'error');
+      return;
+    }
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    try {
+      const r = await fetch(API + '/twilio/upload-contacts', {
+        method: 'POST',
+        body: fd,
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+
+      showToast('✅ Excel importiert', `${data.count || 0} Kontakte geladen`, 'success');
+      input.value = '';
+      await loadContacts();
+    } catch (e) {
+      showToast('❌ Upload fehlgeschlagen', e.message, 'error');
     }
   }
 
