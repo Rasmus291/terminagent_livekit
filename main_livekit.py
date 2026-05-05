@@ -172,31 +172,38 @@ async def lavita_agent(ctx: JobContext):
     session_start_time = datetime.datetime.now()
     session_start_perf = time.perf_counter()
     session_timestamp = session_start_time.strftime("%Y%m%d_%H%M%S")
+    session_partner_name = ""
     assistant_started_event = asyncio.Event()
     audio_recorder = RoomAudioRecorder()
 
     # Latenz-Tracking
     _last_user_speech_end: float | None = None
+    _last_assistant_reply_at: float | None = None
     _latencies: list[float] = []
 
-    # Calendly-Verfügbarkeit vorab cachen (spart 2-3s bei check_availability)
+    # Calendly-Verfügbarkeit vorab cachen (muss im Timeout abbrechen, damit Gesprächsstart nicht hängt)
     _cached_availability: str = ""
     try:
         import calendly_service
-        slots_text = await calendly_service.format_available_slots(days_ahead=5)
+        slots_text = await asyncio.wait_for(
+            calendly_service.format_available_slots(days_ahead=5),
+            timeout=0.8,
+        )
         if slots_text and "Keine freien" not in slots_text:
             _cached_availability = f"\n\nVERFÜGBARE TERMINE (vorab geladen):\n{slots_text}"
             logger.info("Calendly-Verfügbarkeit vorab gecacht.")
+    except asyncio.TimeoutError:
+        logger.info("Calendly-Vorab-Cache übersprungen (Timeout), damit Gesprächsstart sofort erfolgt.")
     except Exception as e:
         logger.warning("Calendly-Vorab-Cache fehlgeschlagen: %s", e)
 
     runtime_instruction = (
         f"{SYSTEM_INSTRUCTION}{_cached_availability}\n\n"
         "AKTUELLER KONTEXT: Der Partner ist bereits in der Leitung. "
-        "Beginne jetzt proaktiv mit persönlicher Begrüßung und kurzem Anliegen. "
+        "Beginne mit einer höflichen, wertschätzenden Begrüßung im Stil des vorgegebenen Einstiegsmusters. "
+        "Nenne kurz den Zweck (Telefontermin zur Optimierung der Zusammenarbeit) und frage dann freundlich nach 10 Minuten in den nächsten Tagen. "
         "Mache noch keinen konkreten Terminslot in der ersten Aussage. "
-        "Nenne zu Beginn oder am Ende keine feste Gesprächsdauer (z. B. '10 Minuten'), "
-        "außer der Partner fragt explizit danach."
+        "Formuliere den Einstieg nicht knapp oder fordernd."
     )
 
     agent = LaVitaLiveKitAgent(instructions=runtime_instruction)
@@ -221,13 +228,15 @@ async def lavita_agent(ctx: JobContext):
     )
 
     def on_conversation_item(event):
-        nonlocal _last_user_speech_end
+        nonlocal _last_user_speech_end, _last_assistant_reply_at
+        logger.info("🔴 on_conversation_item FIRED")
         item = getattr(event, "item", None)
         if not item:
             logger.debug("on_conversation_item: Item ist None")
             return
         role = getattr(item, "role", None)
         text = getattr(item, "text_content", None)
+        logger.info("🔴 Callback: role=%s, has_text=%s", role, text is not None)
         if not text:
             logger.debug(f"on_conversation_item: Text ist None (role={role})")
             return
@@ -236,14 +245,15 @@ async def lavita_agent(ctx: JobContext):
         now_perf = time.perf_counter()
         if role == "user":
             if text.startswith(_START_TRIGGER_PREFIX):
-                logger.info("Interner Start-Trigger gesendet.")
+                logger.info("🔴 START-Trigger erkannt — ignoriert.")
                 return
             _last_user_speech_end = now_perf
-            logger.info("User: %s", text)
+            logger.info("🔴 USER TURN: %s", text)
             session_transcript.append(f"**[{ts}] User:** {text}")
             logger.info("Rufe mark_partner_farewell auf mit: '%s'", text)
             mark_partner_farewell(text)
         elif role == "assistant":
+            _last_assistant_reply_at = now_perf
             # Latenz messen: Zeit zwischen User-Ende und Agent-Antwort
             if _last_user_speech_end is not None:
                 latency = now_perf - _last_user_speech_end
@@ -251,7 +261,7 @@ async def lavita_agent(ctx: JobContext):
                 logger.info("⏱️ Antwort-Latenz: %.2fs", latency)
                 _last_user_speech_end = None
             assistant_started_event.set()
-            logger.info("Agent: %s", text)
+            logger.info("🔴 ASSISTANT TURN: %s", text)
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
             # Farewell-Timer: wenn Agent sich verabschiedet hat, nach 5s automatisch auflegen
@@ -268,9 +278,12 @@ async def lavita_agent(ctx: JobContext):
     def on_session_close(event):
         """Wird aufgerufen wenn die AgentSession geschlossen wird (z.B. Participant disconnect)."""
         reason = getattr(event, "reason", "unbekannt")
-        logger.info("Session geschlossen (Grund: %s). Setze call_ended Event.", reason)
+        logger.info("🔴 Session.on_close() TRIGGERED. Grund: %s", reason)
         if not livekit_state.call_ended.is_set():
+            logger.info("🔴 Setze call_ended Event.")
             livekit_state.call_ended.set()
+        else:
+            logger.info("🔴 call_ended war bereits gesetzt.")
 
     session.on("close", on_session_close)
 
@@ -308,9 +321,12 @@ async def lavita_agent(ctx: JobContext):
             }
 
         logger.info("Speichere Session Report...")
+        report_crm_data = dict(crm_data_saved) if crm_data_saved else {}
+        if session_partner_name and not (report_crm_data.get("partner_name") or "").strip():
+            report_crm_data["partner_name"] = session_partner_name
         save_session_report(
             session_transcript,
-            crm_data=crm_data_saved or None,
+            crm_data=report_crm_data or None,
             call_duration=call_duration,
             call_start_time=call_start_str,
             analysis=analysis,
@@ -362,6 +378,8 @@ async def lavita_agent(ctx: JobContext):
             if raw_name.lower().startswith("partner (") and raw_name.endswith(")"):
                 raw_name = raw_name[9:-1].strip()
             partner_name_for_greeting = raw_name
+            if partner_name_for_greeting and not partner_name_for_greeting.startswith("+"):
+                session_partner_name = partner_name_for_greeting
         except asyncio.TimeoutError:
             logger.warning("Kein Teilnehmer innerhalb von %.0fs erkannt. Starte trotzdem Session.", participant_wait_timeout)
 
@@ -418,18 +436,19 @@ async def lavita_agent(ctx: JobContext):
 
     async def run_session():
         """Startet die Session und stößt die Gesprächseröffnung genau einmal aktiv an."""
-        logger.info("Starte Gemini Live Session...")
+        logger.info("🔴 START run_session()")
         try:
+            logger.info("🔴 Starte session.start()...")
             await session.start(room=ctx.room, agent=agent)
-            logger.info("Session erfolgreich gestartet.")
+            logger.info("🔴 session.start() erfolgreich beendet.")
         except Exception as e:
-            logger.error(f"Fehler beim Session-Start: {e}", exc_info=True)
+            logger.error(f"🔴 Fehler beim Session-Start: {e}", exc_info=True)
             raise
 
         # Nach Gesprächsannahme bewusst kurz warten (natürlicher Gesprächseinstieg)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
         try:
-            logger.info("Stoße Gesprächseröffnung nach 1s Wartezeit an...")
+            logger.info("🔴 Stoße Gesprächseröffnung nach 0.5s an...")
             if partner_name_for_greeting:
                 opening_prompt = (
                     f"{_START_TRIGGER_PREFIX} Der Partner hat abgenommen. "
@@ -442,9 +461,11 @@ async def lavita_agent(ctx: JobContext):
                     "Begrüße ihn freundlich zu Beginn des Gesprächs und starte dann mit dem Anliegen. "
                     "Nenne keine feste Gesprächsdauer."
                 )
+            logger.info("🔴 Rufe session.generate_reply() auf...")
             session.generate_reply(user_input=opening_prompt)
+            logger.info("🔴 session.generate_reply() BEENDET (nicht-blockierend).")
         except Exception as e:
-            logger.warning("Gesprächseröffnung per generate_reply() fehlgeschlagen: %s", e)
+            logger.warning("🔴 Gesprächseröffnung fehlgeschlagen: %s", e)
 
     # Starte Session und End-Call Monitor parallel
     logger.info("Starte Agent-Loop (session + end_call_monitor)...")

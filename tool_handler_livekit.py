@@ -1,11 +1,16 @@
 import asyncio
+import datetime
 import logging
+import os
 import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import calendly_service
 import email_service
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SLOT_TOLERANCE_MINUTES = 5
 
 crm_data_saved: dict = {}
 partner_farewell_detected = False
@@ -65,6 +70,84 @@ def has_confirmed_appointment() -> bool:
         (crm_data_saved.get("status") or "").strip().lower() == "scheduled"
         and bool((crm_data_saved.get("appointment_date") or "").strip())
     )
+
+
+def _parse_appointment_datetime(value: str) -> datetime.datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    for fmt in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _to_booking_timezone(dt: datetime.datetime) -> datetime.datetime:
+    tz_name = getattr(calendly_service, "BOOKING_TIMEZONE", "Europe/Berlin")
+    try:
+        booking_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        booking_tz = datetime.timezone(datetime.timedelta(hours=1))
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=booking_tz)
+    return dt.astimezone(booking_tz)
+
+
+def _is_within_booking_window(local_dt: datetime.datetime) -> bool:
+    windows = getattr(calendly_service, "WEEKDAY_BOOKING_WINDOWS", {})
+    window = windows.get(local_dt.weekday())
+    if not window:
+        return False
+    start_hour, end_hour = window
+    return start_hour <= local_dt.hour < end_hour
+
+
+async def _validate_appointment_slot(appointment_date: str) -> tuple[bool, str | None]:
+    parsed = _parse_appointment_datetime(appointment_date)
+    if not parsed:
+        return False, "Bitte nenne einen konkreten Termin im Format Datum + Uhrzeit (z. B. 2026-05-06 14:30)."
+
+    local_dt = _to_booking_timezone(parsed)
+    if not _is_within_booking_window(local_dt):
+        return False, "Dieser Termin liegt außerhalb des erlaubten Zeitrahmens. Bitte nur verfügbare Slots innerhalb der Bürozeiten anbieten."
+
+    if not calendly_service.is_configured():
+        return True, None
+
+    try:
+        days_ahead = max(1, min(int(os.getenv("CALENDLY_CHECK_DAYS_AHEAD", "14")), 30))
+        slot_tolerance_minutes = max(0, min(int(os.getenv("CALENDLY_SLOT_TOLERANCE_MIN", str(_DEFAULT_SLOT_TOLERANCE_MINUTES))), 15))
+        slots = await calendly_service.get_available_slots(days_ahead=days_ahead)
+    except Exception as e:
+        logger.warning("Calendly-Slot-Validierung fehlgeschlagen: %s", e)
+        return False, "Die Terminverfügbarkeit konnte gerade nicht bestätigt werden. Bitte biete nur explizit verfügbare Slots an."
+
+    tolerance_seconds = slot_tolerance_minutes * 60
+    target_ts = int(local_dt.timestamp())
+    for slot in slots:
+        start_raw = slot.get("start_time")
+        if not start_raw:
+            continue
+        try:
+            slot_dt = datetime.datetime.fromisoformat(start_raw)
+            slot_local = _to_booking_timezone(slot_dt)
+            if abs(int(slot_local.timestamp()) - target_ts) <= tolerance_seconds:
+                return True, None
+        except Exception:
+            continue
+
+    return False, "Der gewählte Termin ist aktuell nicht als verfügbarer Slot vorhanden. Bitte nur angebotene freie Termine bestätigen."
 
 
 def reset_call_state() -> None:
@@ -176,6 +259,15 @@ async def schedule_appointment(
                 "status": "needs_more_info",
                 "missing_fields": ["contact_method"],
                 "message": "Erlaubte Kontaktart ist nur Telefon. Speichere den Termin bitte telefonisch.",
+            }
+
+        slot_ok, slot_msg = await _validate_appointment_slot(appointment_date)
+        if not slot_ok:
+            logger.warning("Termin außerhalb Verfügbarkeit/Zeitfenster: %s", appointment_date)
+            return {
+                "status": "needs_more_info",
+                "missing_fields": ["appointment_date"],
+                "message": slot_msg or "Der Termin ist so nicht möglich. Bitte wähle einen verfügbaren Slot.",
             }
 
     payload = {

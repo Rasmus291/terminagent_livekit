@@ -513,7 +513,7 @@
   <div class="card card-wide">
     <div class="card-header">
       <span class="icon">🕘</span>
-      Letzte Anrufe
+      Letzte Anrufe <span id="history-partner-label" style="font-weight:500;color:var(--gray-500);margin-left:6px;"></span>
       <button class="btn-refresh" onclick="loadCallHistory()">↻ Aktualisieren</button>
     </div>
     <div class="history-layout">
@@ -619,6 +619,7 @@
 
   function renderHistoryList(items) {
     const listEl = document.getElementById('history-list');
+    updateHistoryHeader(items);
     if (!items.length) {
       listEl.innerHTML = '<div class="empty">Noch keine Anrufe vorhanden.</div>';
       return;
@@ -639,6 +640,25 @@
         </div>
       `;
     }).join('');
+  }
+
+  function updateHistoryHeader(items) {
+    const el = document.getElementById('history-partner-label');
+    if (!el) return;
+
+    const selected = items.find(i => i.session_id === selectedSessionId);
+    if (selected?.partner) {
+      el.textContent = `– ${selected.partner}`;
+      return;
+    }
+
+    const names = [...new Set((items || []).map(i => String(i.partner || '').trim()).filter(Boolean))];
+    if (!names.length) {
+      el.textContent = '';
+      return;
+    }
+    const preview = names.slice(0, 3).join(', ');
+    el.textContent = names.length > 3 ? `– ${preview} +${names.length - 3}` : `– ${preview}`;
   }
 
   function updateMonitorConnectionStatus(text, isLive = false) {
