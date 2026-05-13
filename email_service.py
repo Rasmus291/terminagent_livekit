@@ -3,7 +3,7 @@ E-Mail-Benachrichtigung für Terminvorschläge.
 
 Sendet eine E-Mail an den Mitarbeiter mit den Termindetails,
 wenn der Agent einen Termin vereinbart hat.
-Enthält einen Calendly-Link zur Bestätigung.
+Enthält einen Microsoft Kalender-Link zum Event.
 
 Benötigt in .env:
   SMTP_HOST=smtp.gmail.com  (oder anderer SMTP-Server)
@@ -104,9 +104,9 @@ def _build_outlook_calendar_link(
         return None
 
     start = dt.strftime("%Y-%m-%dT%H:%M:%S")
-    end = (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    end = (dt + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    title = f"Termin mit {partner_name}"
+    title = f"Telefontermin LaVita - {partner_name}"
     body = ""
     if notes:
         body = f"Notizen: {notes}"
@@ -127,7 +127,7 @@ def send_appointment_proposal(
     appointment_date: str,
     notes: str,
     status: str,
-    calendly_link: str | None = None,
+    calendly_link: str | None = None,  # Legacy-Parameter, wird ignoriert
     analysis: dict | None = None,
 ) -> bool:
     """
@@ -167,24 +167,17 @@ def send_appointment_proposal(
         sentiment_display += f" ({sentiment_partner}/10)"
 
     # Kalender-Links aufbauen (nur bei vereinbartem Termin mit Datum)
-    google_cal_link = None
     outlook_cal_link = None
     if status == "scheduled" and appointment_date:
-        google_cal_link = _build_google_calendar_link(partner_name, appointment_date, "", notes)
         outlook_cal_link = _build_outlook_calendar_link(partner_name, appointment_date, "", notes)
 
     # Kalender-Buttons HTML
     calendar_buttons_html = ""
-    if google_cal_link or outlook_cal_link or (calendly_link and status == "scheduled"):
+    if outlook_cal_link:
         button_style = "display: inline-block; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 5px 5px 5px 0; font-size: 14px;"
         calendar_buttons_html = '<div style="margin: 20px 0;">'
         calendar_buttons_html += '<p style="font-weight: bold; margin-bottom: 10px;">Termin direkt eintragen:</p>'
-        if calendly_link and status == "scheduled":
-            calendar_buttons_html += f'<a href="{calendly_link}" style="{button_style} background-color: #2c5530;">📅 Calendly – Termin bestätigen</a> '
-        if google_cal_link:
-            calendar_buttons_html += f'<a href="{google_cal_link}" style="{button_style} background-color: #4285F4;">📅 Google Calendar</a> '
-        if outlook_cal_link:
-            calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Outlook</a> '
+        calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Microsoft Kalender – Termin eintragen</a> '
         calendar_buttons_html += '</div>'
 
     # Zusammenfassung HTML
@@ -243,9 +236,7 @@ Notizen: {notes or '-'}
 Stimmung: {sentiment_display}
 {f'Stimmung Details: {stimmung_details}' if stimmung_details else ''}
 {f'Zusammenfassung: {zusammenfassung}' if zusammenfassung else ''}
-{f'Google Calendar: {google_cal_link}' if google_cal_link else ''}
-{f'Outlook: {outlook_cal_link}' if outlook_cal_link else ''}
-{f'Calendly: {calendly_link}' if calendly_link else ''}
+{f'Microsoft Kalender: {outlook_cal_link}' if outlook_cal_link else ''}
 """
 
     msg = MIMEMultipart("alternative")
@@ -289,7 +280,7 @@ def send_call_result_summary(
     analysis: dict | None,
     transcript: list[str] | None,
 ) -> bool:
-    """Sendet eine Ergebnis-Mail mit Gesprächsausgang, Analyse und Calendly-Link."""
+    """Sendet eine Ergebnis-Mail mit Gesprächsausgang, Analyse und Kalender-Link."""
     if not is_configured():
         logger.warning("Ergebnis-Mail übersprungen: SMTP nicht konfiguriert.")
         return False
@@ -304,10 +295,19 @@ def send_call_result_summary(
     transcript = transcript or []
 
     partner_name = (crm_data.get("partner_name") or analysis.get("partner_name") or "Unbekannt").strip()
-    status = (crm_data.get("status") or analysis.get("ergebnis") or "unbekannt").strip()
+    status_raw = (crm_data.get("status") or analysis.get("ergebnis") or "unbekannt").strip()
+    # Normalisierung: Gemini gibt manchmal verschiedene Schreibweisen zurück
+    status_lower = status_raw.lower()
+    if status_lower in ("scheduled", "confirmed", "terminvereinbart", "termin vereinbart", "vereinbart"):
+        status = "scheduled"
+    elif status_lower in ("callback", "rückruf", "rueckruf", "nochmal anrufen"):
+        status = "callback"
+    elif status_lower in ("declined", "abgelehnt", "kein interesse", "kein termin"):
+        status = "declined"
+    else:
+        status = status_raw
     appointment_date = (crm_data.get("appointment_date") or analysis.get("termin") or "-").strip() or "-"
     notes = (crm_data.get("notes") or "-").strip() or "-"
-    calendly_link = crm_data.get("calendly_link")
     sentiment_gesamt = str(analysis.get("sentiment_gesamt") or "unbekannt")
     sentiment_partner = analysis.get("sentiment_partner")
     stimmung_details = str(analysis.get("stimmung_details") or "")
@@ -321,25 +321,18 @@ def send_call_result_summary(
     duration_display = f"{int(round(call_duration_seconds))}s"
 
     # Kalender-Links aufbauen (nur bei vereinbartem Termin mit Datum)
-    google_cal_link = None
     outlook_cal_link = None
     has_appointment = appointment_date and appointment_date != "-" and status == "scheduled"
     if has_appointment:
-        google_cal_link = _build_google_calendar_link(partner_name, appointment_date, "", notes)
         outlook_cal_link = _build_outlook_calendar_link(partner_name, appointment_date, "", notes)
 
     # Kalender-Buttons HTML
     calendar_buttons_html = ""
-    if google_cal_link or outlook_cal_link or (calendly_link and has_appointment):
+    if outlook_cal_link:
         button_style = "display: inline-block; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 5px 5px 5px 0; font-size: 14px;"
         calendar_buttons_html = '<div style="margin: 20px 0;">'
         calendar_buttons_html += '<p style="font-weight: bold; margin-bottom: 10px;">Termin direkt eintragen:</p>'
-        if calendly_link and has_appointment:
-            calendar_buttons_html += f'<a href="{calendly_link}" style="{button_style} background-color: #2c5530;">📅 Calendly – Termin bestätigen</a> '
-        if google_cal_link:
-            calendar_buttons_html += f'<a href="{google_cal_link}" style="{button_style} background-color: #4285F4;">📅 Google Calendar</a> '
-        if outlook_cal_link:
-            calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Outlook</a> '
+        calendar_buttons_html += f'<a href="{outlook_cal_link}" style="{button_style} background-color: #0078D4;">📅 Microsoft Kalender – Termin eintragen</a> '
         calendar_buttons_html += '</div>'
 
     # Zusammenfassung HTML
@@ -361,9 +354,10 @@ def send_call_result_summary(
         f"Stimmung: {sentiment_display}\n"
         f"{f'Stimmung Details: {stimmung_details}' if stimmung_details else ''}\n"
         f"Zusammenfassung: {summary}\n"
-        f"{f'Calendly: {calendly_link}' if calendly_link else ''}\n"
-        f"{f'Google Calendar: {google_cal_link}' if google_cal_link else ''}\n"
-        f"{f'Outlook: {outlook_cal_link}' if outlook_cal_link else ''}\n"
+        f"{f'Microsoft Kalender: {outlook_cal_link}' if outlook_cal_link else ''}\n\n"
+        f"--- Transkript ---\n"
+        + ("\n".join(transcript) if transcript else "Kein Transkript vorhanden.")
+        + "\n"
     )
 
     html = f"""
@@ -373,7 +367,7 @@ def send_call_result_summary(
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold; width: 180px;">Startzeit</td><td style="padding: 8px;">{call_start_time}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Dauer</td><td style="padding: 8px;">{duration_display}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Partner</td><td style="padding: 8px;">{partner_name}</td></tr>
-            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Status</td><td style="padding: 8px;">{'\u2705 Termin vereinbart' if status == 'scheduled' else '\ud83d\udd04 R\u00fcckruf' if status == 'callback' else '\u274c Abgelehnt' if status == 'declined' else status}</td></tr>
+            <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Status</td><td style="padding: 8px;">{'\u2705 Termin vereinbart' if status == 'scheduled' else '\U0001f504 R\u00fcckruf' if status == 'callback' else '\u274c Abgelehnt' if status == 'declined' else status}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Termin</td><td style="padding: 8px;">{appointment_date}</td></tr>
             <tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Stimmung</td><td style="padding: 8px;">{sentiment_display}</td></tr>
             {'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: bold;">Stimmung Details</td><td style="padding: 8px;">' + stimmung_details + '</td></tr>' if stimmung_details else ''}
@@ -384,7 +378,9 @@ def send_call_result_summary(
 
         {calendar_buttons_html}
 
-        <p style="color: #777; font-size: 12px;">Transkriptzeilen: {len(transcript)}</p>
+        {'<div style="background-color: #f0f2f5; padding: 12px 16px; margin: 20px 0; border-radius: 6px;"><p style="font-weight: bold; margin: 0 0 8px 0;">Transkript (' + str(len(transcript)) + ' Zeilen)</p><div style="font-size: 13px; line-height: 1.6;">' + '<br>'.join(transcript) + '</div></div>' if transcript else '<p style="color: #888;">Kein Transkript vorhanden.</p>'}
+
+        <p style="color: #777; font-size: 12px;">Diese E-Mail wurde automatisch vom LaVita Terminagent erstellt.</p>
     </div>
     """
 

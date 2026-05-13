@@ -15,13 +15,19 @@ _START_TRIGGER_PREFIX = "[START_TRIGGER]"
 # Audio-Latenz-Tracking (User stoppt → Agent spricht)
 _user_stopped_speaking_at: float | None = None
 _audio_latencies: list[float] = []
+_last_agent_speech_time: float = 0.0
+
+
+def get_last_agent_speech_time() -> float:
+    return _last_agent_speech_time
 
 
 def register_audio_latency_events(session):
     """Registriert Events zur echten Audio-Latenz-Messung."""
-    global _user_stopped_speaking_at, _audio_latencies
+    global _user_stopped_speaking_at, _audio_latencies, _last_agent_speech_time
     _user_stopped_speaking_at = None
     _audio_latencies = []
+    _last_agent_speech_time = 0.0
 
     def on_user_state(event):
         global _user_stopped_speaking_at
@@ -93,8 +99,23 @@ def create_conversation_handler(session_transcript, latencies_list, started_even
             last_user_speech_end[0] = now_perf
             logger.info("User: %s", text)
             session_transcript.append(f"**[{ts}] User:** {text}")
+
+            # Mailbox-Erkennung: sofort auflegen
+            normalized_lower = text.lower()
+            mailbox_keywords = ("mailbox", "anrufbeantworter", "hinterlassen sie eine nachricht",
+                                "nach dem signalton", "piep", "zur zeit nicht erreichbar",
+                                "derzeit nicht erreichbar", "momentan nicht erreichbar")
+            if any(kw in normalized_lower for kw in mailbox_keywords):
+                from tool_handler import call_ended as _ce
+                logger.info("Mailbox erkannt — lege sofort auf.")
+                if _ce and not _ce.is_set():
+                    _ce.set()
+                return
+
             mark_partner_farewell(text)
         elif role == "assistant":
+            global _last_agent_speech_time
+            _last_agent_speech_time = now_perf
             if last_user_speech_end[0] is not None:
                 latency = now_perf - last_user_speech_end[0]
                 latencies_list.append(latency)
@@ -105,24 +126,29 @@ def create_conversation_handler(session_transcript, latencies_list, started_even
             session_transcript.append(f"**[{ts}] Agent:** {text}")
             mark_assistant_farewell(text)
 
-            # Farewell: Agent hat sich verabschiedet → warte kurz auf Partner-Verabschiedung, dann sofort auflegen
+            # Farewell: Agent hat sich verabschiedet → sehr kurz warten, dann auflegen
             from tool_handler import assistant_farewell_detected, partner_farewell_detected, call_ended
-            if assistant_farewell_detected and not call_ended.is_set():
-                async def _farewell_timer():
-                    # Warte max 3s auf Partner-Verabschiedung, dann sofort auflegen
-                    for _ in range(30):  # 30 * 100ms = 3s
-                        await asyncio.sleep(0.1)
-                        if partner_farewell_detected or call_ended.is_set():
-                            break
-                    if not call_ended.is_set():
-                        logger.info("Auflegen nach Verabschiedung.")
-                        call_ended.set()
-                asyncio.create_task(_farewell_timer())
+            if assistant_farewell_detected and call_ended and not call_ended.is_set():
+                if partner_farewell_detected:
+                    # Partner hat sich SCHON verabschiedet → sofort auflegen
+                    logger.info("Beide verabschiedet — lege sofort auf.")
+                    call_ended.set()
+                else:
+                    # Warte max 0.5s auf Partner-Verabschiedung
+                    async def _farewell_timer():
+                        for _ in range(5):  # 5 * 100ms = 0.5s
+                            await asyncio.sleep(0.1)
+                            if partner_farewell_detected or call_ended.is_set():
+                                break
+                        if not call_ended.is_set():
+                            logger.info("Auflegen nach Verabschiedung (0.5s Timer).")
+                            call_ended.set()
+                    asyncio.create_task(_farewell_timer())
 
         # Partner verabschiedet sich → sofort auflegen (Agent hat schon gesprochen)
         if role == "user":
             from tool_handler import assistant_farewell_detected as _asst_fw, partner_farewell_detected as _part_fw, call_ended as _ce
-            if _part_fw and _asst_fw and not _ce.is_set():
+            if _part_fw and _asst_fw and _ce and not _ce.is_set():
                 logger.info("Beide verabschiedet — lege sofort auf.")
                 _ce.set()
 
@@ -135,6 +161,9 @@ async def finalize_session(
 ):
     """Generiert Analyse, speichert Report, sendet E-Mail, speichert Audio."""
     from reporting import generate_analysis, save_session_report
+
+    # SOFORT UI benachrichtigen (bevor Analyse läuft)
+    await audio_recorder.notify_call_end()
 
     call_duration = time.perf_counter() - session_start_perf
     call_start_str = session_start_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -168,7 +197,6 @@ async def finalize_session(
     except Exception as e:
         logger.error("E-Mail-Versand fehlgeschlagen: %s", e)
 
-    await audio_recorder.notify_call_end()
     audio_recorder.stop()
     try:
         rec = audio_recorder.save(directory="sessions", timestamp=session_timestamp)
@@ -181,12 +209,18 @@ async def finalize_session(
 
 async def end_call_monitor(ctx, finalize_fn, session):
     """Überwacht call_ended Event und beendet den SIP-Call."""
-    from tool_handler import call_ended
+    import tool_handler
+
+    # Event wurde bereits in lavita_agent() im richtigen Loop erstellt.
+    # Falls es noch None ist (sollte nicht passieren), erstelle es hier.
+    if tool_handler.call_ended is None:
+        tool_handler.call_ended = asyncio.Event()
+    call_ended_event = tool_handler.call_ended
 
     reason = "unbekannt"
     try:
         logger.info("End-Call Monitor aktiviert.")
-        await asyncio.wait_for(call_ended.wait(), timeout=600)
+        await asyncio.wait_for(call_ended_event.wait(), timeout=600)
         reason = "end_call aufgerufen"
         logger.info("End-Call Signal empfangen!")
     except asyncio.TimeoutError:
@@ -198,7 +232,8 @@ async def end_call_monitor(ctx, finalize_fn, session):
     finally:
         # Sofort Session unterbrechen damit Agent nichts mehr sagt
         try:
-            session.interrupt()
+            if session:
+                session.interrupt()
         except Exception:
             pass
 
@@ -207,7 +242,7 @@ async def end_call_monitor(ctx, finalize_fn, session):
         except Exception as e:
             logger.error("finalize_session fehlgeschlagen: %s", e, exc_info=True)
 
-        # SIP-Participant entfernen
+        # SIP-Participant entfernen mit Retry
         try:
             from livekit.api import LiveKitAPI, RoomParticipantIdentity
             lk_url = os.getenv("LIVEKIT_URL", "")
@@ -216,9 +251,17 @@ async def end_call_monitor(ctx, finalize_fn, session):
             async with LiveKitAPI(lk_url, lk_key, lk_secret) as lk:
                 for identity in list(ctx.room.remote_participants):
                     logger.info("Entferne Participant %s", identity)
-                    await lk.room.remove_participant(
-                        RoomParticipantIdentity(room=ctx.room.name, identity=identity)
-                    )
+                    for _attempt in range(3):
+                        try:
+                            await lk.room.remove_participant(
+                                RoomParticipantIdentity(room=ctx.room.name, identity=identity)
+                            )
+                            break
+                        except Exception as _e:
+                            if _attempt == 2:
+                                logger.warning("Participant %s konnte nicht entfernt werden: %s", identity, _e)
+                            else:
+                                await asyncio.sleep(1.0 * (2 ** _attempt))
         except Exception as e:
             logger.warning("SIP-Auflegen fehlgeschlagen: %s", e)
             try:
@@ -227,4 +270,12 @@ async def end_call_monitor(ctx, finalize_fn, session):
                 pass
 
         session.shutdown(drain=False)
+        # Kurzer Delay vor dem endgültigen Exit — gibt dem Rust WebRTC-Layer
+        # Zeit, ausstehende IO-Operationen sauber abzuschließen.
+        # Verhindert den "ParseIntError" Rust Panic beim Cleanup.
+        await asyncio.sleep(1.0)
+        try:
+            await ctx.room.disconnect()
+        except Exception:
+            pass
         logger.info("Session beendet.")

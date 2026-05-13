@@ -1,4 +1,7 @@
-# LiveKit Agents + Gemini Live
+# LiveKit Agents + Pipeline-Plugins
 livekit-agents[silero,google]~=1.5
+livekit-plugins-deepgram
+livekit-plugins-elevenlabs
 python-dotenv
 httpx
+psutil

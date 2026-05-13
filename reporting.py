@@ -222,7 +222,7 @@ Transkript:
                     import time
 
                     logger.warning("Analyse Versuch %s fehlgeschlagen, wiederhole...", attempt + 1)
-                    time.sleep(5 * (attempt + 1))
+                    time.sleep(2 * (attempt + 1))
                     continue
                 raise
     except Exception as e:
@@ -237,6 +237,7 @@ def save_session_report(
     call_start_time=None,
     analysis=None,
     timestamp=None,
+    latency_data=None,
 ):
     os.makedirs("sessions", exist_ok=True)
     timestamp = timestamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -256,6 +257,30 @@ def save_session_report(
             f.write(f"- **Gesprächsdauer:** {minutes}:{seconds:02d} min\n")
         f.write("\n")
 
+        if latency_data and latency_data.get("turns", 0) > 0:
+            f.write("## Latenz-Analyse\n")
+            f.write(f"- **Turns gemessen:** {latency_data['turns']}\n")
+            f.write(f"- **E2E Ø:** {latency_data['e2e_avg_ms']} ms\n")
+            f.write(f"- **E2E Min:** {latency_data['e2e_min_ms']} ms\n")
+            f.write(f"- **E2E Max:** {latency_data['e2e_max_ms']} ms\n")
+            if latency_data.get("gemini_ttft_avg_ms"):
+                f.write(f"- **Gemini TTFT Ø:** {latency_data['gemini_ttft_avg_ms']} ms\n")
+            per_turn = latency_data.get("per_turn", [])
+            if per_turn:
+                f.write("\n| Turn | E2E ms | Phase1 ms | Phase2 ms | TTFT ms | Tokens in | Tokens out |\n")
+                f.write("|------|--------|-----------|-----------|---------|-----------|------------|\n")
+                for t in per_turn:
+                    f.write(
+                        f"| {t['turn']} "
+                        f"| {t['e2e_ms']} "
+                        f"| {t['phase1_endpoint_sdk_ms']} "
+                        f"| {t['phase2_inference_audio_ms']} "
+                        f"| {t['gemini_ttft_ms']} "
+                        f"| {t['tokens_in']} "
+                        f"| {t['tokens_out']} |\n"
+                    )
+            f.write("\n")
+
         if crm_data:
             f.write("## Termindaten\n")
             f.write(f"- **Partner:** {crm_data.get('partner_name', 'N/A')}\n")
@@ -263,6 +288,18 @@ def save_session_report(
             f.write(f"- **Termin:** {crm_data.get('appointment_date', 'N/A')}\n")
             f.write(f"- **Kontaktart:** {crm_data.get('contact_method', 'N/A')}\n")
             f.write(f"- **Notizen:** {crm_data.get('notes', 'N/A')}\n\n")
+        elif analysis and isinstance(analysis, dict):
+            # Termin aus Analyse extrahieren (wenn kein CRM-Data vorhanden)
+            termin = analysis.get("termin", "")
+            partner = analysis.get("partner_name", "")
+            ergebnis = analysis.get("ergebnis", "")
+            f.write("## Termindaten\n")
+            if partner:
+                f.write(f"- **Partner:** {partner}\n")
+            f.write(f"- **Status:** {ergebnis or 'unbekannt'}\n")
+            if termin:
+                f.write(f"- **Termin:** {termin}\n")
+            f.write("\n")
 
         if analysis and isinstance(analysis, dict):
             f.write("## Zusammenfassung\n\n")

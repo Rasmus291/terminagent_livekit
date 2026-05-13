@@ -441,8 +441,16 @@
     </div>
     <div class="card-body">
       <div class="form-group">
+        <label>Anrede</label>
+        <select id="manual-salutation">
+          <option value="">— Keine —</option>
+          <option value="Herr">Herr</option>
+          <option value="Frau">Frau</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label>Name des Kontakts</label>
-        <input type="text" id="manual-name" placeholder="z.B. Max Mustermann" />
+        <input type="text" id="manual-name" placeholder="z.B. Mustermann" />
       </div>
       <div class="form-group">
         <label>Telefonnummer</label>
@@ -459,6 +467,10 @@
     <div class="card-header">
       <span class="icon">📋</span>
       Kontakte aus Excel
+      <label style="margin-left:auto;cursor:pointer;" class="btn-refresh">
+        📁 Excel hochladen
+        <input type="file" id="excel-upload" accept=".xlsx,.xls" style="display:none;" onchange="uploadExcel(this)" />
+      </label>
       <button class="btn-refresh" onclick="loadContacts()">
         ↻ Aktualisieren
       </button>
@@ -504,10 +516,11 @@
           <div id="agent-monitor-status" class="monitor-status monitor-state-idle">—</div>
           <div class="monitor-meta">Live-Ausgabe der Stimme von Anna / Agent.</div>
         </div>
-        <div class="monitor-panel" id="latency-panel" style="display:none;">
-          <h4>🎙️ Audio-Latenz</h4>
-          <div id="latency-current" style="font-size:2em;font-weight:bold;color:#2563eb;">—</div>
+        <div class="monitor-panel" id="latency-panel">
+          <h4>⏱️ Antwort-Latenz (Live)</h4>
+          <div id="latency-current" style="font-size:2.5em;font-weight:bold;color:var(--gray-300);transition:color 0.3s;">—</div>
           <div class="monitor-meta">Letzte: <span id="latency-last">—</span> | Ø <span id="latency-avg">—</span></div>
+          <div class="monitor-meta" id="latency-history" style="margin-top:6px;font-size:11px;color:var(--gray-400);"></div>
         </div>
       </div>
     </div>
@@ -544,6 +557,26 @@
   let monitorEnabled = false;
   let monitorNextTimes = { partner: 0, agent: 0 };
   let monitorGainNodes = { partner: null, agent: null };
+  let monitorPollTimer = null;
+
+  // --- Auto-connect WebSocket for latency & call-state (no audio) ---
+  let dataSocket = null;
+  function connectDataSocket() {
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    dataSocket = new WebSocket(`${wsScheme}://${window.location.host}/monitor/ws`);
+    dataSocket.onmessage = (event) => {
+      const payload = JSON.parse(event.data);
+      // Only handle latency + call-state events here (audio handled by live monitor)
+      if (payload.type === 'latency') handleMonitorMessage(payload);
+      if (payload.type === 'call-start' || payload.type === 'call-end' || payload.type === 'state') handleMonitorMessage(payload);
+    };
+    dataSocket.onclose = () => {
+      // Auto-reconnect after 3s (only if live monitor isn't already connected)
+      setTimeout(() => { if (!monitorEnabled) connectDataSocket(); }, 3000);
+    };
+    dataSocket.onerror = () => {};
+  }
+  connectDataSocket();
 
   // --- Status check ---
   async function checkStatus() {
@@ -577,7 +610,7 @@
     const listEl = document.getElementById('history-list');
     listEl.innerHTML = '<div class="loading"><div class="spinner"></div><br>Anrufhistorie wird geladen…</div>';
     try {
-      const r = await fetch(API + '/twilio/call-history?limit=5');
+      const r = await fetch(API + '/twilio/call-history');
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       historyItems = data.items || [];
@@ -603,7 +636,7 @@
     listEl.innerHTML = items.map(item => {
       const partner = item.partner || 'Unbekannt';
       const status = item.status || 'unbekannt';
-      const date = item.date_time || item.session_id;
+      const date = formatDateGerman(item.date_time || item.session_id);
       const duration = item.duration || '-';
       const preview = item.summary_preview || 'Keine Zusammenfassung';
       const activeClass = item.session_id === selectedSessionId ? 'active' : '';
@@ -639,6 +672,33 @@
     updateMonitorTrackStatus('agent', text, false);
   }
 
+  async function pollActiveCall() {
+    // Fallback: fragt API-Server direkt ob ein Call bei LiveKit aktiv ist
+    try {
+      const r = await fetch(API + '/monitor/active-call');
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.active && !monitorCallStartTime) {
+        // Anruf erkannt den wir verpasst hatten!
+        const name = data.contact_name || 'Unbekannt';
+        updateMonitorCallMeta(`🟢 Anruf läuft: ${name} (via Polling erkannt)`);
+        const meta = document.getElementById('monitor-call-meta');
+        if (meta) meta._callName = `🟢 Anruf läuft: ${name}`;
+        monitorCallStartTime = Date.now();
+        if (monitorCallTimer) clearInterval(monitorCallTimer);
+        monitorCallTimer = setInterval(updateMonitorCallDuration, 1000);
+        resetMonitorTrackStatus(true);
+      } else if (!data.active && monitorCallStartTime) {
+        // Call wurde beendet aber wir haben kein call-end Event bekommen
+        stopRingback();
+        if (monitorCallTimer) { clearInterval(monitorCallTimer); monitorCallTimer = null; }
+        monitorCallStartTime = null;
+        updateMonitorCallMeta('🔴 Anruf beendet (via Polling erkannt)');
+        resetMonitorTrackStatus();
+      }
+    } catch(e) { /* Polling-Fehler ignorieren */ }
+  }
+
   async function toggleLiveMonitor() {
     if (monitorEnabled) {
       stopLiveMonitor();
@@ -669,6 +729,11 @@
 
       monitorSocket.onopen = () => {
         updateMonitorConnectionStatus('Live-Monitor verbunden', true);
+        // Starte Fallback-Polling alle 2s für verpasste Call-Events
+        if (monitorPollTimer) clearInterval(monitorPollTimer);
+        monitorPollTimer = setInterval(pollActiveCall, 2000);
+        // Sofort einmal prüfen
+        pollActiveCall();
       };
 
       monitorSocket.onmessage = (event) => {
@@ -678,7 +743,13 @@
 
       monitorSocket.onclose = () => {
         if (monitorEnabled) {
-          updateMonitorConnectionStatus('Verbindung getrennt', false);
+          updateMonitorConnectionStatus('Verbindung getrennt — reconnect…', false);
+          // Auto-Reconnect nach 2s
+          setTimeout(() => {
+            if (monitorEnabled && (!monitorSocket || monitorSocket.readyState === WebSocket.CLOSED)) {
+              startLiveMonitor();
+            }
+          }, 2000);
         }
       };
 
@@ -697,6 +768,7 @@
     monitorEnabled = false;
     stopRingback();
     if (monitorCallTimer) { clearInterval(monitorCallTimer); monitorCallTimer = null; }
+    if (monitorPollTimer) { clearInterval(monitorPollTimer); monitorPollTimer = null; }
     monitorCallStartTime = null;
     if (monitorSocket) {
       try { monitorSocket.close(); } catch {}
@@ -814,19 +886,27 @@
     }
 
     if (payload.type === 'latency') {
-      const panel = document.getElementById('latency-panel');
-      if (panel) panel.style.display = '';
       const ms = Math.round(payload.latency * 1000);
       const avgMs = Math.round(payload.avg * 1000);
       const el = document.getElementById('latency-current');
       if (el) {
         el.textContent = ms + 'ms';
-        el.style.color = ms < 1000 ? '#16a34a' : ms < 1500 ? '#d97706' : '#dc2626';
+        el.style.color = ms < 1500 ? '#16a34a' : ms < 2500 ? '#d97706' : '#dc2626';
+        // Flash animation
+        el.style.transform = 'scale(1.1)';
+        setTimeout(() => { el.style.transform = 'scale(1)'; }, 200);
       }
       const lastEl = document.getElementById('latency-last');
       if (lastEl) lastEl.textContent = ms + 'ms';
       const avgEl = document.getElementById('latency-avg');
       if (avgEl) avgEl.textContent = avgMs + 'ms';
+      // History
+      const histEl = document.getElementById('latency-history');
+      if (histEl) {
+        if (!histEl._vals) histEl._vals = [];
+        histEl._vals.push(ms);
+        histEl.textContent = histEl._vals.map(v => v + 'ms').join(' → ');
+      }
     }
   }
 
@@ -904,7 +984,7 @@
         <div class="detail-pill"><b>Partner</b>${esc(item.partner || 'Unbekannt')}</div>
         <div class="detail-pill"><b>Status</b>${esc(item.status || 'unbekannt')}</div>
         <div class="detail-pill"><b>Vereinbarter Termin</b>${esc(item.appointment_date || '-')}</div>
-        <div class="detail-pill"><b>Datum</b>${esc(item.date_time || '-')}</div>
+        <div class="detail-pill"><b>Datum</b>${esc(formatDateGerman(item.date_time || '-'))}</div>
         <div class="detail-pill"><b>Dauer</b>${esc(item.duration || '-')}</div>
       </div>
 
@@ -1005,7 +1085,7 @@
 
   function startStatusPolling() {
     stopStatusPolling();
-    statusPollTimer = setInterval(checkActiveCallStatus, 2500);
+    statusPollTimer = setInterval(checkActiveCallStatus, 1500);
   }
 
   function stopStatusPolling() {
@@ -1016,14 +1096,14 @@
 
   async function checkActiveCallStatus() {
     if (!activeCall?.sid) return;
-    // Grace period: ignore "completed" in first 10s (room may not exist yet)
+    // Grace period: ignore "completed" in first 5s (room may not exist yet)
     const elapsed = Date.now() - (activeCall.startedAt || 0);
     try {
       const r = await fetch(`${API}/twilio/call-status/${encodeURIComponent(activeCall.sid)}`);
       if (!r.ok) return;
       const data = await r.json();
       if (!isCallActiveStatus(data.status)) {
-        if (elapsed < 10000) return; // Still in grace period
+        if (elapsed < 5000) return; // Still in grace period
         const target = activeCall.target;
         clearActiveCall();
         showToast('Anruf beendet', `${target} (${data.status || 'beendet'})`, 'info');
@@ -1092,6 +1172,7 @@
   async function startManualCall() {
     const name = document.getElementById('manual-name').value.trim();
     const phone = document.getElementById('manual-phone').value.trim();
+    const salutation = document.getElementById('manual-salutation').value;
     if (!phone) { showToast('Bitte Nummer eingeben', '', 'error'); return; }
 
     const btn = document.getElementById('btn-manual-call');
@@ -1102,7 +1183,7 @@
       const r = await fetch(API + '/twilio/call', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: phone, name: name || undefined })
+        body: JSON.stringify({ to: phone, name: name || undefined, salutation: salutation || undefined })
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
@@ -1110,6 +1191,7 @@
       setActiveCall(data.call_sid, 'manual', name || phone);
       document.getElementById('manual-name').value = '';
       document.getElementById('manual-phone').value = '';
+      document.getElementById('manual-salutation').value = '';
     } catch(e) {
       showToast('❌ Fehler', e.message, 'error');
     } finally {
@@ -1152,9 +1234,73 @@
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // --- Auto-Notifications via WebSocket ---
+  let notifSocket = null;
+
+  function connectNotificationSocket() {
+    if (notifSocket && notifSocket.readyState <= 1) return;
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    notifSocket = new WebSocket(`${wsScheme}://${window.location.host}/monitor/ws`);
+
+    notifSocket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'call-start') {
+          const name = payload.contact_name || payload.caller_id || 'Unbekannt';
+          showToast('📞 Anruf gestartet', `Anruf mit ${name} läuft`, 'success');
+        } else if (payload.type === 'call-end') {
+          const name = payload.contact_name || payload.caller_id || 'Unbekannt';
+          showToast('🔴 Anruf beendet', `Anruf mit ${name} beendet`, 'info');
+          if (activeCall) {
+            clearActiveCall();
+          }
+          loadCallHistory();
+        }
+      } catch {}
+    };
+
+    notifSocket.onclose = () => {
+      setTimeout(connectNotificationSocket, 5000);
+    };
+
+    notifSocket.onerror = () => {
+      try { notifSocket.close(); } catch {}
+    };
+  }
+
+  // --- Excel Upload ---
+  async function uploadExcel(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    showToast('📁 Upload', `"${file.name}" wird hochgeladen…`, 'info');
+    try {
+      const r = await fetch(API + '/twilio/upload-contacts', { method: 'POST', body: formData });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+      showToast('✅ Upload erfolgreich', data.message, 'success');
+      loadContacts();
+    } catch (e) {
+      showToast('❌ Upload fehlgeschlagen', e.message, 'error');
+    }
+    input.value = '';
+  }
+
+  // --- German date formatting ---
+  function formatDateGerman(dateStr) {
+    if (!dateStr) return '-';
+    // Parse "2026-05-06 11:20:07" format
+    const m = dateStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+    if (!m) return dateStr;
+    const [, y, mo, d, h, mi] = m;
+    return `${d}.${mo}.${y} ${h}:${mi}`;
+  }
+
   // Init
   document.getElementById('btn-manual-call').onclick = handleManualButton;
   document.getElementById('btn-live-monitor').onclick = toggleLiveMonitor;
+  connectNotificationSocket();
   checkStatus();
   loadContacts();
   loadCallHistory();
