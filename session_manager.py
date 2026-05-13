@@ -81,12 +81,32 @@ def create_conversation_handler(session_transcript, latencies_list, started_even
     mark_partner_farewell = farewell_imports["mark_partner_farewell"]
     mark_assistant_farewell = farewell_imports["mark_assistant_farewell"]
 
+    # Track user utterances to avoid duplicate entries from multiple event sources
+    _seen_user_texts: set[str] = set()
+
+    def _extract_text(item) -> str | None:
+        """Extract text from a ChatMessage, checking both str content and AudioContent.transcript."""
+        text = getattr(item, "text_content", None)
+        if text:
+            return text
+        # For realtime audio with transcription, text is in AudioContent.transcript
+        content = getattr(item, "content", None)
+        if content:
+            parts = []
+            for c in content:
+                t = getattr(c, "transcript", None)
+                if t:
+                    parts.append(t)
+            if parts:
+                return " ".join(parts)
+        return None
+
     def on_conversation_item(event):
         item = getattr(event, "item", None)
         if not item:
             return
         role = getattr(item, "role", None)
-        text = getattr(item, "text_content", None)
+        text = _extract_text(item)
         if not text:
             return
 
@@ -96,6 +116,7 @@ def create_conversation_handler(session_transcript, latencies_list, started_even
         if role == "user":
             if text.startswith(_START_TRIGGER_PREFIX):
                 return
+            _seen_user_texts.add(text)
             last_user_speech_end[0] = now_perf
             logger.info("User: %s", text)
             session_transcript.append(f"**[{ts}] User:** {text}")
@@ -152,7 +173,23 @@ def create_conversation_handler(session_transcript, latencies_list, started_even
                 logger.info("Beide verabschiedet — lege sofort auf.")
                 _ce.set()
 
-    return on_conversation_item
+    def on_user_input_transcribed(event):
+        """Fallback handler for user_input_transcribed events (when conversation_item_added lacks text)."""
+        if not event.is_final:
+            return
+        text = (event.transcript or "").strip()
+        if not text or text.startswith(_START_TRIGGER_PREFIX):
+            return
+        # Avoid duplicate if already captured via conversation_item_added
+        if text in _seen_user_texts:
+            return
+        _seen_user_texts.add(text)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info("User (transcribed): %s", text)
+        session_transcript.append(f"**[{ts}] User:** {text}")
+        mark_partner_farewell(text)
+
+    return on_conversation_item, on_user_input_transcribed
 
 
 async def finalize_session(

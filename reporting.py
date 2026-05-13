@@ -255,6 +255,16 @@ def save_session_report(
         if call_duration is not None:
             minutes, seconds = divmod(int(call_duration), 60)
             f.write(f"- **Gesprächsdauer:** {minutes}:{seconds:02d} min\n")
+
+        # Partner name: prefer CRM data, fall back to analysis
+        _partner_name = ""
+        if crm_data and crm_data.get("partner_name"):
+            _partner_name = crm_data["partner_name"]
+        elif analysis and isinstance(analysis, dict) and analysis.get("partner_name"):
+            _partner_name = analysis["partner_name"]
+        if _partner_name and _partner_name.lower() not in ("unbekannt", "n/a", ""):
+            f.write(f"- **Partner:** {_partner_name}\n")
+
         f.write("\n")
 
         if latency_data and latency_data.get("turns", 0) > 0:
